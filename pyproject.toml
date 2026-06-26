@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "rcsb-enrichment"
+version = "0.1.0"
+description = "Enrich a CSV of PDB IDs with RCSB/PDBe quality metrics, related entries, and binding-site annotations"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["structural-biology", "pdb", "rcsb", "drug-discovery", "cheminformatics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "requests>=2.31",
+    "certifi>=2024.1",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+rcsb-enrich = "rcsb_enrichment.rcsb_enrichment:main"
+
+[project.urls]
+Repository = "https://github.com/<org>/rcsb-enrichment"
+Issues = "https://github.com/<org>/rcsb-enrichment/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
