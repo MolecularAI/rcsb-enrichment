@@ -7,7 +7,21 @@ Update this file whenever a decision is made that future contributors (or Claude
 
 ## Project overview
 
-Single-file CLI script (`src/rcsb_enrichment/rcsb_enrichment.py`) that reads a CSV of PDB IDs, queries several REST APIs, and writes an enriched CSV. The script is intentionally monolithic for now; refactoring into modules is planned.
+CLI tool that reads a CSV of PDB IDs, queries several REST APIs, and writes an enriched CSV.
+Package layout:
+
+```
+src/rcsb_enrichment/
+    client.py          # RCSBClient, _build_ca_bundle, URL constants
+    quality.py         # get_entry_quality, get_ligand_quality, traffic_light
+    entities.py        # get_polymer_entities, extract_direct_binders
+    related.py         # get_related_by_uniprot*, get_related_by_sequence
+    holo.py            # get_holo_ligand_quality, _inchikey_to_ccd, _find_holo_entries
+    binding_sites.py   # get_pdbe_binding_sites
+    ligand_filter.py   # _NON_INTERESTING_CCD, is_interesting_ligand
+    enrich.py          # enrich_row, _normalise_pdb_id, _is_valid_pdb_id
+    cli.py             # main, detect_pdb_col, detect_uniprot_col
+```
 
 ---
 
@@ -36,6 +50,10 @@ These were confirmed by live API inspection; do not change without re-verifying.
 - `pdbx_vrpt_summary_geometry[0]` — clashscore, percent_ramachandran_outliers, percent_rotamer_outliers, bonds_RMSZ, angles_RMSZ
 - `pdbx_vrpt_summary_diffraction[0].percent_RSRZ_outliers` — **NOT** in geometry block; only present for X-ray structures with EDS processing
 - `rcsb_entry_container_identifiers.non_polymer_entity_ids` — nonpolymer entity IDs (note: `non_polymer_entity_ids`, not `nonpolymer_entity_ids`)
+
+### Nonpolymer entity (`/nonpolymer_entity/{pdb_id}/{entity_id}`)
+- `rcsb_nonpolymer_entity_container_identifiers.nonpolymer_comp_id` — CCD code (NOT `comp_id`)
+- `rcsb_nonpolymer_entity_container_identifiers.asym_ids` — list of instance asym_ids (NOT `nonpolymer_entity_instance_ids`)
 
 ### Ligand validation
 - `rcsb_nonpolymer_instance_validation_score[0].RSCC` — uppercase; `.rscc` returns None
@@ -85,6 +103,14 @@ These were confirmed by live API inspection; do not change without re-verifying.
 **Flow:** known binder → CCD (from `cofactor_chem_comp_id` or InChIKey→CCD search) → UniProt+CCD holo search → `get_ligand_quality()` on holo entries.  
 **Limit:** `_MAX_HOLO_ENTRIES = 3` holo structures per binder.
 
+### Peptide ligand detection
+**Decision:** polymer chains classified as peptide binders are written to a separate `peptide_ligands` column, not mixed with `ligands_interesting`/`ligands_noninteresting` (which cover small-molecule non-polymer entities only).  
+**Classification logic (in `get_polymer_entities`):**  
+1. BIRD-annotated chains (`rcsb_polymer_entity_container_identifiers.bird_id` is non-null) — always peptide ligands; BIRD is the PDB's formal oligopeptide ligand registry.  
+2. Protein-type chains with no UniProt mapping **and** sequence length ≤ `_PEPTIDE_LEN_THRESHOLD` (30 residues) — treated as short uncharacterised peptide binders.  
+**Column value:** comma-separated labels — BIRD ID when available, otherwise the one-letter sequence.  
+**Downstream effect:** peptide ligand chains are excluded from the receptor entity list; they do not contribute to UniProt resolution, related-entry search, cofactor lookup, or traffic-light scoring.
+
 ### Ligand interest classification
 **Decision:** two output columns — `ligands_interesting` (drug-like) and `ligands_noninteresting` (ions/solvents/cofactors/detergents).  
 **Why:** co-crystallised non-polymer entities include many biologically relevant but not drug-targeted molecules (Mg²⁺, ATP, HEPES, PEG) that would corrupt the traffic-light score if mixed with actual drug candidates.  
@@ -110,27 +136,48 @@ These were confirmed by live API inspection; do not change without re-verifying.
 **Why:** Excel reformats PDB IDs beginning with a digit (e.g. `6BHD`) using thousands separators, producing `6,000 BHD`. Removing commas and spaces recovers the original ID. A warning is logged whenever normalisation changes the raw value.
 
 ### TLS / CA bundle (macOS only)
-**Decision:** `_build_ca_bundle()` merges macOS system keychain certs with certifi's bundle into a temp PEM file at process start.  
-**Why:** corporate TLS-inspecting proxies install a root CA in the system keychain that certifi does not include, causing SSL errors on all HTTPS requests. The merge happens once per process; the temp file is not cleaned up (it is small and deterministic).
+**Decision:** `_build_ca_bundle()` merges macOS system keychain certs with certifi's bundle into a temp PEM file at process start. Each keychain cert is individually probed with `ssl.SSLContext.load_verify_locations` and dropped if OpenSSL rejects it.  
+**Why:** corporate TLS-inspecting proxies install a root CA in the system keychain that certifi does not include, causing SSL errors on all HTTPS requests. The per-cert probe is needed because Python 3.14's OpenSSL enforces strict RFC 5280 compliance: legacy macOS certs whose `Basic Constraints` extension is not marked critical are now rejected with `SSLCertVerificationError`. Filtering them out before writing the bundle prevents the error without breaking the proxy CA inclusion. The merge happens once per process; the temp file is not cleaned up (it is small and deterministic).
 
 ### RSRZ is not in `pdbx_vrpt_summary_geometry`
 **Why recorded:** `percent_RSRZ_outliers` appears to belong in the geometry validation block but is actually in `pdbx_vrpt_summary_diffraction`, a separate block only present for X-ray structures processed by DCC/EDS. This was a live-API-verified correction; do not move it back.
 
+### `iridium_score`: design and known gaps vs. OpenEye Iridium
+
+**What we implemented (`quality.iridium_score`):**  
+A weighted-mean composite grade ("good" / "fair" / "bad") over six global structure criteria and one binding-site criterion:
+
+| Criterion | Good | Fair | Bad | Weight |
+|-----------|------|------|-----|--------|
+| Resolution (Å) | ≤ 2.5 | ≤ 3.0 | > 3.0 | 1 (X-ray only) |
+| R-free | ≤ 0.25 | ≤ 0.30 | > 0.30 | 1 (X-ray only) |
+| Clashscore | ≤ 10 | ≤ 25 | > 25 | 1 |
+| Ramachandran outliers % | ≤ 0.5 | ≤ 2.0 | > 2.0 | 1 |
+| Rotamer outliers % | ≤ 1.0 | ≤ 5.0 | > 5.0 | 1 |
+| RSRZ outliers % | ≤ 5.0 | ≤ 10.0 | > 10.0 | 1 (X-ray + EDS only) |
+| Best ligand `binding_quality` (traffic-light) | good | fair | bad | 2 |
+
+Weighted mean < 0.67 → "good", < 1.33 → "fair", ≥ 1.33 → "bad". Missing metrics are excluded (not penalised); the score degrades gracefully for cryo-EM and NMR entries.
+
+**OpenEye Iridium (Warren et al., Drug Discovery Today, 2012 — recalled from training data, verify against paper before acting on):**  
+Iridium grades X-ray structures HT / MT / LT (high / medium / low throughput for SBDD) using a decision-tree rather than a weighted mean. Key criteria reportedly include:
+
+- Resolution
+- R-free
+- Clashscore (MolProbity)
+- Ramachandran outliers
+- Ligand RSCC (real-space correlation coefficient)
+- **Ligand average B-factor** (or ratio to protein mean B-factor) — the single biggest gap in our implementation; high relative B-factor signals a disordered pose even when RSCC looks acceptable
+- **Ligand occupancy** — partial occupancy (< 1.0) is penalised; we do not track it
+
+**Structural differences:**  
+- *Decision tree vs. weighted mean:* Iridium downgrades a structure if any single criterion fails its threshold, with no compensation from other good metrics. Our averaging is more lenient — excellent density fit can offset a mediocre clashscore.  
+- *Scope:* Iridium is X-ray-only by design; our score handles cryo-EM and NMR gracefully by skipping X-ray-only sub-criteria.  
+- *Extra criteria we added (not in Iridium):* contact-residue outlier fraction and intermolecular clash count (both captured in the `binding_quality` traffic-light that feeds into `iridium_score` with weight 2).
+
+**To close the gap, the two most impactful additions would be:**  
+1. Ligand B-factor ratio — available via `rcsb_nonpolymer_instance_validation_score[0].average_occupancy` (occupancy already present in RCSB API); the B-factor itself may need the `pdbx_nonpoly_scheme` or wwPDB validation XML.  
+2. Ligand occupancy — `rcsb_nonpolymer_instance_validation_score[0].average_occupancy`; threshold at < 1.0 (fair) / < 0.5 (bad) is a reasonable starting point.
+
 ---
 
-## Planned refactoring
-
-The script is intentionally kept as a single file during the exploratory phase. When refactoring into modules, the natural split is:
-
-```
-src/rcsb_enrichment/
-    client.py          # RCSBClient, _build_ca_bundle
-    quality.py         # get_entry_quality, get_ligand_quality, traffic_light
-    entities.py        # get_polymer_entities, _extract_direct_binders
-    related.py         # get_related_by_uniprot*, get_related_by_sequence
-    holo.py            # get_holo_ligand_quality, _inchikey_to_ccd, _find_holo_entries
-    binding_sites.py   # get_pdbe_binding_sites
-    ligand_filter.py   # _NON_INTERESTING_CCD, _is_interesting_ligand
-    enrich.py          # enrich_row (orchestration)
-    cli.py             # main, detect_pdb_col, detect_uniprot_col
-```

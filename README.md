@@ -4,6 +4,7 @@ Enrich a CSV of PDB IDs with structure quality metrics, related entries, known b
 
 ## Features
 
+- **Structure quality score** — composite Iridium-like grade (`good` / `fair` / `bad`) combining resolution, R-free, clashscore, Ramachandran/rotamer outliers, RSRZ outliers %, and ligand binding quality
 - **Crystal structure quality** — resolution, R-work/R-free, clashscore, Ramachandran/rotamer outliers %, RSRZ outliers %
 - **Related structures** — split into same-region siblings vs full-length proteins via a chain-length threshold (1.4×), searched by UniProt accession or sequence similarity
 - **Known binders** — direct pharmacological binders (ChEMBL/DrugBank, `neighbor_flag=N` only) from the query structure, its siblings, and full-length proteins
@@ -16,7 +17,7 @@ Enrich a CSV of PDB IDs with structure quality metrics, related entries, known b
 ## Installation
 
 ```bash
-git clone https://github.com/<org>/rcsb-enrichment.git
+git clone https://github.com/MolecularAI/rcsb-enrichment.git
 cd rcsb-enrichment
 pip install -e .
 ```
@@ -43,8 +44,21 @@ The `--pdb-col` and `--uniprot-col` arguments are auto-detected from common colu
 
 ## Output columns
 
+### Row metadata
+
 | Column | Description |
 |---|---|
+| `row_type` | `primary` for the input PDB entry; `ligand` for per-ligand sub-rows from related structures |
+| `parent_pdb_id` | PDB ID of the input structure (set on ligand sub-rows) |
+| `related_pdb_ids` | PDB ID of the sibling structure this ligand sub-row comes from |
+| `fulllength_pdb_ids` | PDB ID of the full-length structure this ligand sub-row comes from |
+
+### Structure quality
+
+| Column | Description |
+|---|---|
+| `species` | Source organism(s), comma-separated |
+| `structure_quality` | Composite grade: `good` / `fair` / `bad` (Iridium-like) |
 | `exp_method` | Experimental method (X-RAY DIFFRACTION, ELECTRON MICROSCOPY, …) |
 | `resolution_A` | Diffraction resolution in Å |
 | `r_work` / `r_free` | Crystallographic R-factors |
@@ -53,23 +67,51 @@ The `--pdb-col` and `--uniprot-col` arguments are auto-detected from common colu
 | `rotamer_outliers_pct` | % rotamer outliers |
 | `rsrz_outliers_pct` | % RSRZ outliers (X-ray + EDS only) |
 | `bonds_rmsz` / `angles_rmsz` | Bond/angle RMSZ from wwPDB validation |
+
+### Per-ligand detail (ligand sub-rows)
+
+| Column | Description |
+|---|---|
+| `ligand_type` | `small_molecule` or `peptide` |
+| `ligand_id` | CCD code or BIRD ID / one-letter sequence (peptides) |
+| `chain_id` | Asymmetric unit chain ID |
+| `ligand_rscc` | Real-space correlation coefficient |
+| `ligand_rsr` | Real-space R-value |
+| `ligand_rmsz_bonds` / `ligand_rmsz_angles` | Mogul bond/angle geometry Z-scores |
+| `ligand_intermolecular_clashes` | Count of intermolecular clashes |
+| `contact_residue_count` | Number of protein residues within 4 Å |
+| `contact_outlier_fraction` | Fraction of contact residues carrying validation outliers |
+| `contact_residues` | Semicolon-separated contact residue labels |
+| `binding_quality` | Per-ligand traffic-light: `good` / `fair` / `bad` |
+
+### Ligands summary (primary rows)
+
+| Column | Description |
+|---|---|
 | `ligands_present` | All CCD codes of co-crystallised non-polymer entities |
 | `ligands_interesting` | Drug-like ligands (ISI flag / not in exclusion list) |
 | `ligands_noninteresting` | Ions, solvents, cofactors, detergents |
 | `ligand_quality` | JSON — per-instance metrics for interesting ligands |
-| `cofactor_ion_quality` | JSON — per-instance metrics for non-interesting ligands |
-| `ligand_binding_quality` | Worst traffic-light across interesting ligands: `good`/`fair`/`bad` |
-| `holo_quality` | JSON — per-binder holo structure lookup results |
-| `related_pdb_ids` | Same-region sibling PDB entries (same UniProt, chain length ≤ 1.4×) |
-| `related_pdb_count` | Count of siblings |
-| `fulllength_pdb_ids` | Full-length protein PDB entries (chain length > 1.4× query) |
-| `fulllength_pdb_count` | Count of full-length entries |
-| `related_search_method` | How related entries were found (`uniprot_split`, `uniprot`, `sequence_id_*`, `none`) |
-| `known_binders` | Names of direct pharmacological binders (ChEMBL/DrugBank) |
-| `known_binder_smiles` | SMILES of known binders |
-| `has_binding_site` | Boolean — any binding site evidence found |
-| `binding_site_sources` | Which databases contributed (`UniProt/CSA`, `ChEMBL/DrugBank`, `PDBe-KB/SIFTS`) |
+| `holo_quality` | JSON — ligand quality from holo structures (populated for apo/fragment inputs) |
+
+### Related entries
+
+| Column | Description |
+|---|---|
+| `related_pdb_ids_no_ligand` | Sibling PDB IDs with no meaningful ligand |
+| `related_pdb_ids_no_ligand_count` | Count of the above |
+| `fulllength_pdb_ids_no_ligand` | Full-length PDB IDs with no meaningful ligand |
+| `fulllength_pdb_ids_no_ligand_count` | Count of the above |
+| `related_search_method` | `uniprot_split`, `uniprot`, `sequence_id_<threshold>`, or `none` |
+
+### Binding sites and binders
+
+| Column | Description |
+|---|---|
+| `binding_site_sources` | Contributing databases: `UniProt/CSA`, `ChEMBL/DrugBank`, `PDBe-KB/SIFTS` |
 | `binding_site_notes` | Human-readable binding site descriptions |
+| `known_binders` | Names of direct pharmacological binders |
+| `known_binder_smiles` | SMILES of known binders (same order) |
 
 ## TLS / proxy note
 
@@ -82,6 +124,6 @@ RCSB asks for polite access. The default `--delay 0.1` (100 ms between requests)
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+pip install -e .
 pytest
 ```

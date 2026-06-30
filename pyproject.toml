@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "rcsb-enrichment"
@@ -27,11 +27,11 @@ dependencies = [
 ]
 
 [project.scripts]
-rcsb-enrich = "rcsb_enrichment.rcsb_enrichment:main"
+rcsb-enrich = "rcsb_enrichment.cli:main"
 
 [project.urls]
-Repository = "https://github.com/<org>/rcsb-enrichment"
-Issues = "https://github.com/<org>/rcsb-enrichment/issues"
+Repository = "https://github.com/MolecularAI/rcsb-enrichment"
+Issues = "https://github.com/MolecularAI/rcsb-enrichment/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
