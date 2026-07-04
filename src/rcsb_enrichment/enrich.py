@@ -268,15 +268,29 @@ def enrich_row(
     search_method = ""
 
     if all_uniprot:
-        log.info("[%s] Searching related entries by UniProt %s", pdb_id, all_uniprot[0])
-        if first_sequence:
-            sibling_ids, fulllength_ids = get_related_by_uniprot_split(
-                client, all_uniprot[0], len(first_sequence), max_rows=max_related * 2
-            )
-            search_method = "uniprot_split"
-        else:
-            sibling_ids = get_related_by_uniprot(client, all_uniprot[0], max_rows=max_related * 2)
-            search_method = "uniprot"
+        seen_siblings: set = set()
+        seen_fulllength: set = set()
+        for uid in all_uniprot:
+            log.info("[%s] Searching related entries by UniProt %s", pdb_id, uid)
+            if first_sequence:
+                _sib, _full = get_related_by_uniprot_split(
+                    client, uid, len(first_sequence), max_rows=max_related * 2
+                )
+                for r in _sib:
+                    if r not in seen_siblings:
+                        seen_siblings.add(r)
+                        sibling_ids.append(r)
+                for r in _full:
+                    if r not in seen_fulllength:
+                        seen_fulllength.add(r)
+                        fulllength_ids.append(r)
+                search_method = "uniprot_split"
+            else:
+                for r in get_related_by_uniprot(client, uid, max_rows=max_related * 2):
+                    if r not in seen_siblings:
+                        seen_siblings.add(r)
+                        sibling_ids.append(r)
+                search_method = "uniprot"
     elif first_sequence:
         log.info("[%s] No UniProt; falling back to sequence similarity search", pdb_id)
         sibling_ids = get_related_by_sequence(

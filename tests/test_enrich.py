@@ -291,6 +291,49 @@ class TestEnrichRow:
         assert result["exp_method"] is None
         assert result["resolution_A"] is None
 
+    def test_all_resolved_uniprots_searched_for_related_entries(self):
+        """Bug: when CSV has no UniProt and the entry has multiple protein chains with
+        different UniProt IDs, the related-entry search must be performed for ALL resolved
+        IDs, not just all_uniprot[0].  Previously only the first UniProt was ever passed
+        to get_related_by_uniprot_split / get_related_by_uniprot."""
+        entry_data = {
+            "exptl": [{"method": "X-RAY DIFFRACTION"}],
+            "rcsb_entry_info": {"diffrn_resolution_high": {"value": 2.0}, "nonpolymer_bound_components": []},
+            "refine": [],
+            "pdbx_vrpt_summary_geometry": [],
+            "pdbx_vrpt_summary_diffraction": [],
+            "rcsb_entry_container_identifiers": {"polymer_entity_ids": ["1", "2"], "non_polymer_entity_ids": []},
+        }
+        def _entity(uniprot_id, seq="A" * 100):
+            return {
+                "entity_poly": {"rcsb_entity_polymer_type": "Protein", "pdbx_seq_one_letter_code_can": seq},
+                "rcsb_polymer_entity_container_identifiers": {"uniprot_ids": [uniprot_id], "bird_id": None},
+                "rcsb_target_cofactors": [],
+                "rcsb_polymer_entity_feature": [],
+            }
+        client = MagicMock()
+        client.get.side_effect = [entry_data, _entity("P11111"), _entity("P22222"), {"1abc": []}]
+        client.post.return_value = {"result_set": []}
+        enrich_row(
+            row={"PDBID": "1ABC", "Uniprot": ""},
+            client=client,
+            pdb_col="PDBID",
+            uniprot_col="Uniprot",
+            seq_identity=0.9,
+            max_related=25,
+        )
+        # Extract UniProt values searched across all POST calls
+        searched_uniprots = set()
+        for call in client.post.call_args_list:
+            payload = call.args[1] if len(call.args) > 1 else call.kwargs.get("json", {})
+            payload_str = str(payload)
+            if "P11111" in payload_str:
+                searched_uniprots.add("P11111")
+            if "P22222" in payload_str:
+                searched_uniprots.add("P22222")
+        assert "P11111" in searched_uniprots, "first resolved UniProt must be used in related search"
+        assert "P22222" in searched_uniprots, "second resolved UniProt must be used in related search — bug: was skipped"
+
     def test_uniprot_resolved_from_entity_when_missing(self):
         entry_data = {
             "exptl": [{"method": "X-RAY DIFFRACTION"}],
