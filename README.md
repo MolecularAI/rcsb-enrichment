@@ -6,12 +6,15 @@ Enrich a CSV of PDB IDs with structure quality metrics, related entries, known b
 
 - **Structure quality score** — composite Iridium-like grade (`good` / `fair` / `bad`) combining resolution, R-free, clashscore, Ramachandran/rotamer outliers, RSRZ outliers %, and ligand binding quality
 - **Crystal structure quality** — resolution, R-work/R-free, clashscore, Ramachandran/rotamer outliers %, RSRZ outliers %
-- **Related structures** — split into same-region siblings vs full-length proteins via a chain-length threshold (1.4×), searched by UniProt accession or sequence similarity
+- **Entity names** — comma-separated list of all polymer and non-polymer entity descriptions per structure, placed immediately after the PDB ID column
+- **Related structures** — split into same-region siblings vs full-length proteins via a chain-length threshold (1.4×), searched by UniProt accession or sequence similarity; all resolved UniProt IDs are searched when a structure has multiple receptor chains
 - **Known binders** — direct pharmacological binders (ChEMBL/DrugBank, `neighbor_flag=N` only) from the query structure, its siblings, and full-length proteins
 - **Holo structure lookup** — for each known binder, finds co-crystallised PDB entries via InChIKey→CCD→UniProt+CCD search, even when the query structure is apo or a fragment
 - **Ligand binding quality** — per-ligand traffic-light score (`good` / `fair` / `bad`) combining RSCC, RSR, Mogul RMSZ (bonds + angles), intermolecular clashes, and fraction of contact residues (≤4 Å) carrying geometry/density outliers
 - **Ligand classification** — splits co-crystallised ligands into drug-like (`ligands_interesting`) and non-interesting (`ligands_noninteresting`: ions, solvents, cofactors, detergents) using the RCSB `is_subject_of_investigation` flag with CCD exclusion list fallback
 - **Binding site annotations** — UniProt/CSA site features and PDBe-KB/SIFTS binding site descriptions
+- **Entity name filtering** — restrict processing to specific receptor chains by molecule name substring (`--entity-names`)
+- **Cross-row deduplication** — related structures that appear in search results for multiple input PDB IDs are fetched only once per run
 - **Excel PDB ID repair** — recovers IDs mangled by Excel's thousands-separator formatting (e.g. `6,000 BHD` → `6BHD`)
 
 ## Installation
@@ -37,10 +40,13 @@ rcsb-enrich \
     --uniprot-col Uniprot \
     --seq-identity 0.9 \
     --max-related 25 \
-    --delay 0.1
+    --delay 0.1 \
+    --entity-names "Tubulin,Kinase"
 ```
 
 The `--pdb-col` and `--uniprot-col` arguments are auto-detected from common column name aliases if omitted.
+
+`--entity-names` accepts a comma-separated list of molecule name substrings. When set, only receptor chains whose `pdbx_description` contains at least one term as a whole whitespace-delimited word are processed; other chains are ignored. This is useful for heteromeric complexes where only specific subunits are of interest. For example, `--entity-names Tubulin` applied to PDB entry 5S5V (which contains alpha-tubulin, beta-tubulin, Stathmin-4, and Tubulin-Tyrosine Ligase) retains only the two tubulin chains. Note that hyphenated compound words are treated as single tokens: `Tubulin` does **not** match `Tubulin-Tyrosine`.
 
 ## Output columns
 
@@ -50,6 +56,7 @@ The `--pdb-col` and `--uniprot-col` arguments are auto-detected from common colu
 |---|---|
 | `row_type` | `primary` for the input PDB entry; `ligand` for per-ligand sub-rows from related structures |
 | `parent_pdb_id` | PDB ID of the input structure (set on ligand sub-rows) |
+| `entity_names` | Comma-separated descriptions of all polymer and non-polymer entities (placed immediately after the PDB ID column) |
 | `related_pdb_ids` | PDB ID of the sibling structure this ligand sub-row comes from |
 | `fulllength_pdb_ids` | PDB ID of the full-length structure this ligand sub-row comes from |
 
@@ -98,11 +105,15 @@ The `--pdb-col` and `--uniprot-col` arguments are auto-detected from common colu
 
 | Column | Description |
 |---|---|
+| `all_related_pdb_ids` | All sibling PDB IDs found by search (up to `--max-related`), regardless of ligand content |
+| `all_fulllength_pdb_ids` | All full-length PDB IDs found by search (up to `--max-related`), regardless of ligand content |
 | `related_pdb_ids_no_ligand` | Sibling PDB IDs with no meaningful ligand |
 | `related_pdb_ids_no_ligand_count` | Count of the above |
 | `fulllength_pdb_ids_no_ligand` | Full-length PDB IDs with no meaningful ligand |
 | `fulllength_pdb_ids_no_ligand_count` | Count of the above |
 | `related_search_method` | `uniprot_split`, `uniprot`, `sequence_id_<threshold>`, or `none` |
+
+The `related_pdb_ids` and `fulllength_pdb_ids` tag columns (one PDB ID per ligand sub-row) identify which related structure a ligand sub-row's data came from.
 
 ### Binding sites and binders
 

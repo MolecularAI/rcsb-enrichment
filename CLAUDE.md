@@ -19,7 +19,8 @@ src/rcsb_enrichment/
     holo.py            # get_holo_ligand_quality, _inchikey_to_ccd, _find_holo_entries
     binding_sites.py   # get_pdbe_binding_sites
     ligand_filter.py   # _NON_INTERESTING_CCD, is_interesting_ligand
-    enrich.py          # enrich_row, _normalise_pdb_id, _is_valid_pdb_id
+    enrich.py          # enrich_row, _normalise_pdb_id, _is_valid_pdb_id,
+                       #   _entity_matches_names, _collect_entity_names
     cli.py             # main, detect_pdb_col, detect_uniprot_col
 ```
 
@@ -51,9 +52,13 @@ These were confirmed by live API inspection; do not change without re-verifying.
 - `pdbx_vrpt_summary_diffraction[0].percent_RSRZ_outliers` — **NOT** in geometry block; only present for X-ray structures with EDS processing
 - `rcsb_entry_container_identifiers.non_polymer_entity_ids` — nonpolymer entity IDs (note: `non_polymer_entity_ids`, not `nonpolymer_entity_ids`)
 
+### Polymer entity (`/polymer_entity/{pdb_id}/{entity_id}`)
+- `rcsb_polymer_entity.pdbx_description` — human-readable molecule name (e.g. "Tubulin alpha-1B chain"); stored as `entity["description"]` by `get_polymer_entities`
+
 ### Nonpolymer entity (`/nonpolymer_entity/{pdb_id}/{entity_id}`)
 - `rcsb_nonpolymer_entity_container_identifiers.nonpolymer_comp_id` — CCD code (NOT `comp_id`)
 - `rcsb_nonpolymer_entity_container_identifiers.asym_ids` — list of instance asym_ids (NOT `nonpolymer_entity_instance_ids`)
+- `rcsb_nonpolymer_entity.pdbx_description` — human-readable ligand name (e.g. "GUANOSINE-5'-TRIPHOSPHATE"); stored as `description` in each ligand metric dict by `get_ligand_quality`
 
 ### Ligand validation
 - `rcsb_nonpolymer_instance_validation_score[0].RSCC` — uppercase; `.rscc` returns None
@@ -178,6 +183,31 @@ Iridium grades X-ray structures HT / MT / LT (high / medium / low throughput for
 **To close the gap, the two most impactful additions would be:**  
 1. Ligand B-factor ratio — available via `rcsb_nonpolymer_instance_validation_score[0].average_occupancy` (occupancy already present in RCSB API); the B-factor itself may need the `pdbx_nonpoly_scheme` or wwPDB validation XML.  
 2. Ligand occupancy — `rcsb_nonpolymer_instance_validation_score[0].average_occupancy`; threshold at < 1.0 (fair) / < 0.5 (bad) is a reasonable starting point.
+
+### Multi-UniProt related-entry search
+
+**Decision:** when a structure has multiple receptor chains (e.g. a heterodimer), `get_related_by_uniprot_split` / `get_related_by_uniprot` is called once per resolved UniProt ID, and results are merged with deduplication.  
+**Why:** the original code only searched `all_uniprot[0]`. For a heteromeric complex, this silently skipped all chains beyond the first, returning an incomplete set of related structures.  
+**Implementation:** a `seen` set tracks already-added PDB IDs within the sibling and full-length lists to prevent duplicates from overlapping search results.
+
+### Entity name column (`entity_names`)
+
+**Decision:** a comma-separated `entity_names` column lists the `pdbx_description` of every polymer and non-polymer entity for that structure. Polymer descriptions appear first, then non-polymer. Duplicates (e.g. homodimer chains with the same description) are deduplicated. The column is placed immediately after the PDB ID column in the output CSV.  
+**Scope:** populated for both primary rows (from `enrich_row`) and related-entry ligand sub-rows (from `_fetch_related_ligand_data`). The column is included in `tags` passed to `build_ligand_rows`, so it propagates onto sibling and full-length sub-rows.  
+**API source:** `rcsb_polymer_entity.pdbx_description` (polymer) and `rcsb_nonpolymer_entity.pdbx_description` (non-polymer).
+
+### Entity name filtering (`--entity-names`)
+
+**Decision:** an optional `--entity-names` CLI argument accepts comma-separated substrings. After `get_polymer_entities` returns, receptor entities are filtered to those whose `pdbx_description` contains at least one term as a whole whitespace-delimited token (case-insensitive). Filtered-out entities do not contribute to UniProt resolution, related-entry search, cofactor lookup, or binding-site scoring.  
+**Matching rule:** split description on whitespace, check if any filter term equals a token. Hyphenated compounds are single tokens: `"Tubulin"` matches `"Tubulin alpha-1B chain"` but NOT `"Tubulin-Tyrosine Ligase"`.  
+**Why token-based not substring:** substring matching would make `"Tubulin"` spuriously match `"Tubulin-Tyrosine Ligase"`, returning four entities for 5S5V instead of the expected two.
+
+### Cross-row deduplication cache
+
+**Decision:** `cli.main()` creates two dicts — `related_data_cache` and `binders_cache` — that are shared across all `enrich_row` calls in a run. They are keyed by PDB ID and cache the results of `_fetch_related_ligand_data` and `extract_direct_binders` respectively. When multiple input PDB IDs resolve to the same set of related structures (e.g. 5S5V and 4X1Y are both tubulin structures), each related entry is fetched only once.  
+**Why dicts not sets:** the cache must store the full fetched data, not just presence; `_fetch_related_ligand_data` is expensive (multiple API calls per related entry).  
+**Mutation safety:** `extract_direct_binders` results are cached as returned; callers must `dict(b)` before adding `binder_source_type` to avoid mutating the cached original. This is enforced at the call sites in `enrich_row`.  
+**New output columns:** `all_related_pdb_ids` and `all_fulllength_pdb_ids` on primary rows list the complete search-result sets (all found siblings/full-lengths, after self and other-input exclusion), independently of whether those entries have meaningful ligands.
 
 ---
 
