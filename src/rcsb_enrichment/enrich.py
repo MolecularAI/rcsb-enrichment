@@ -211,6 +211,8 @@ def enrich_row(
     max_related: int,
     input_pdb_ids: frozenset = frozenset(),
     entity_name_filters: list | None = None,
+    related_data_cache: dict | None = None,
+    binders_cache: dict | None = None,
 ) -> dict:
     pdb_id = _normalise_pdb_id(str(row[pdb_col]).strip()).upper()
     result = dict(row)
@@ -356,12 +358,19 @@ def enrich_row(
     sibling_ids = [r for r in sibling_ids if r.upper() not in other_input and r.upper() != pdb_id]
     fulllength_ids = [r for r in fulllength_ids if r.upper() not in other_input and r.upper() != pdb_id]
 
+    def _get_related_data(pid: str) -> dict:
+        if related_data_cache is not None:
+            if pid not in related_data_cache:
+                related_data_cache[pid] = _fetch_related_ligand_data(client, pid)
+            return related_data_cache[pid]
+        return _fetch_related_ligand_data(client, pid)
+
     # Split related entries into those with and without meaningful ligands
     sibling_no_ligand: list = []
     sibling_ligand_entries: list = []
     for sid in sibling_ids[:max_related]:
         log.info("[%s] Checking sibling %s for ligands", pdb_id, sid)
-        data = _fetch_related_ligand_data(client, sid)
+        data = _get_related_data(sid)
         if data["has_ligands"]:
             sibling_ligand_entries.append(data)
         else:
@@ -371,12 +380,14 @@ def enrich_row(
     fulllength_ligand_entries: list = []
     for fid in fulllength_ids[:max_related]:
         log.info("[%s] Checking full-length %s for ligands", pdb_id, fid)
-        data = _fetch_related_ligand_data(client, fid)
+        data = _get_related_data(fid)
         if data["has_ligands"]:
             fulllength_ligand_entries.append(data)
         else:
             fulllength_no_ligand.append(fid)
 
+    result["all_related_pdb_ids"] = ",".join(sibling_ids[:max_related])
+    result["all_fulllength_pdb_ids"] = ",".join(fulllength_ids[:max_related])
     result["related_pdb_ids_no_ligand"] = ",".join(sibling_no_ligand)
     result["related_pdb_ids_no_ligand_count"] = len(sibling_no_ligand)
     result["fulllength_pdb_ids_no_ligand"] = ",".join(fulllength_no_ligand)
@@ -403,19 +414,28 @@ def enrich_row(
     for e in entities:
         all_cofactors.extend(e.get("cofactors") or [])
 
+    def _get_binders(pid: str) -> list:
+        if binders_cache is not None:
+            if pid not in binders_cache:
+                binders_cache[pid] = extract_direct_binders(client, pid)
+            return binders_cache[pid]
+        return extract_direct_binders(client, pid)
+
     # Pull binders from siblings — prefer those with ligands first (already fetched), then no-ligand
     binder_siblings = [e["pdb_id"] for e in sibling_ligand_entries] + sibling_no_ligand
     for sid in binder_siblings[:_MAX_RELATED_BINDER_ENTRIES]:
         log.info("[%s] Fetching binders from sibling %s", pdb_id, sid)
-        for b in extract_direct_binders(client, sid):
+        for b in _get_binders(sid):
+            b = dict(b)
             b["binder_source_type"] = "sibling"
             all_cofactors.append(b)
 
     binder_fulllengths = [e["pdb_id"] for e in fulllength_ligand_entries] + fulllength_no_ligand
     for fid in binder_fulllengths[:_MAX_RELATED_BINDER_ENTRIES]:
         log.info("[%s] Fetching binders from full-length %s", pdb_id, fid)
-        for b in extract_direct_binders(client, fid):
+        for b in _get_binders(fid):
             if b.get("chem_comp_id") and b["chem_comp_id"] in query_ccd_codes:
+                b = dict(b)
                 b["binder_source_type"] = "fulllength"
                 all_cofactors.append(b)
 

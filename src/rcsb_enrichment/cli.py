@@ -51,6 +51,9 @@ _AUGMENTED_COLS = (
     "ligands_noninteresting",
     "ligand_quality",
     "holo_quality",
+    # Complete lists of all related entries found by search
+    "all_related_pdb_ids",
+    "all_fulllength_pdb_ids",
     # Lists of related entries that carry NO meaningful ligand
     "related_pdb_ids_no_ligand",
     "related_pdb_ids_no_ligand_count",
@@ -165,6 +168,10 @@ def main() -> None:
     )
 
     client = RCSBClient(delay=args.delay)
+    # Shared caches across all input rows so related-entry API calls are never duplicated
+    # when multiple input PDB IDs resolve to overlapping sets of related structures.
+    related_data_cache: dict = {}
+    binders_cache: dict = {}
     enriched_rows = []
 
     for i, row in enumerate(df.to_dict(orient="records"), 1):
@@ -189,6 +196,8 @@ def main() -> None:
                 max_related=args.max_related,
                 input_pdb_ids=input_pdb_ids,
                 entity_name_filters=entity_name_filters,
+                related_data_cache=related_data_cache,
+                binders_cache=binders_cache,
             )
         except Exception as exc:
             log.error("[%s] Failed: %s", pdb_id, exc, exc_info=True)

@@ -861,3 +861,245 @@ class TestEntityNamesInEnrichRow:
         data = _fetch_related_ligand_data(client, "1HSG")
         assert "entity_names" in data
         assert "HIV-1 Protease" in data["entity_names"]
+
+
+# ---------------------------------------------------------------------------
+# related_data_cache and binders_cache deduplication
+# ---------------------------------------------------------------------------
+
+class TestRelatedDataCache:
+    """Verify that _fetch_related_ligand_data and extract_direct_binders are
+    called at most once per related PDB ID, even when multiple input rows would
+    independently request the same related entry.
+
+    The cache is a plain dict shared across enrich_row calls (created once in
+    cli.main).  We test the enrich_row contract directly by supplying a
+    pre-shared dict and counting API calls.
+    """
+
+    def _entry_data(self, polymer_ids=None, np_ids=None):
+        return {
+            "exptl": [{"method": "X-RAY DIFFRACTION"}],
+            "rcsb_entry_info": {"diffrn_resolution_high": {"value": 2.0}, "nonpolymer_bound_components": []},
+            "refine": [],
+            "pdbx_vrpt_summary_geometry": [],
+            "pdbx_vrpt_summary_diffraction": [],
+            "rcsb_entry_container_identifiers": {
+                "polymer_entity_ids": polymer_ids or ["1"],
+                "non_polymer_entity_ids": np_ids or [],
+            },
+        }
+
+    def _poly_entity(self, uniprot_id="P12345", seq="A" * 100):
+        return {
+            "entity_poly": {"rcsb_entity_polymer_type": "Protein", "pdbx_seq_one_letter_code_can": seq},
+            "rcsb_polymer_entity_container_identifiers": {"uniprot_ids": [uniprot_id], "bird_id": None},
+            "rcsb_polymer_entity": {"pdbx_description": "Test Protein"},
+            "rcsb_entity_source_organism": [],
+            "rcsb_target_cofactors": [],
+            "rcsb_polymer_entity_feature": [],
+        }
+
+    def _stub_result(self, pdb_id="2SIB"):
+        return {
+            "pdb_id": pdb_id, "entry_quality": {}, "ligand_metrics": [],
+            "peptide_entities": [], "has_ligands": False,
+            "species": "", "entity_names": "", "structure_quality": "",
+        }
+
+    def _make_primary_client(self):
+        """Minimal client for two primary rows; each row's search returns '2SIB' (siblings only)."""
+        client = MagicMock()
+        entry = self._entry_data()
+        poly = self._poly_entity()
+        pdbe = {"1abc": []}
+        client.get.side_effect = [entry, poly, pdbe, entry, poly, pdbe]
+        client.post.side_effect = [
+            {"result_set": [{"identifier": "2SIB"}]},  # row 1 siblings
+            {"result_set": []},                         # row 1 full-length
+            {"result_set": [{"identifier": "2SIB"}]},  # row 2 siblings
+            {"result_set": []},                         # row 2 full-length
+        ]
+        return client
+
+    def test_related_data_fetched_only_once_with_cache(self):
+        """With a shared cache _fetch_related_ligand_data is called once for 2SIB
+        across two separate enrich_row calls that both find 2SIB as a related entry."""
+        cache = {}
+        client = self._make_primary_client()
+
+        with patch("rcsb_enrichment.enrich._fetch_related_ligand_data", wraps=lambda c, p: self._stub_result(p)) as mock_fetch, \
+             patch("rcsb_enrichment.enrich.extract_direct_binders", return_value=[]):
+            for pdb_id in ("1ABC", "4XYZ"):
+                enrich_row(
+                    row={"PDBID": pdb_id, "Uniprot": "P12345"},
+                    client=client,
+                    pdb_col="PDBID",
+                    uniprot_col="Uniprot",
+                    seq_identity=0.9,
+                    max_related=5,
+                    related_data_cache=cache,
+                    binders_cache={},
+                )
+
+        # Cache populated and _fetch_related_ligand_data called exactly once
+        assert "2SIB" in cache
+        assert mock_fetch.call_count == 1
+
+    def test_related_data_fetched_twice_without_cache(self):
+        """Without a shared cache _fetch_related_ligand_data is called once per row."""
+        client = MagicMock()
+        entry = self._entry_data()
+        poly = self._poly_entity()
+        pdbe = {"1abc": []}
+        client.get.side_effect = [entry, poly, pdbe, entry, poly, pdbe]
+        client.post.side_effect = [
+            {"result_set": [{"identifier": "2SIB"}]},  # row 1 siblings
+            {"result_set": []},                         # row 1 full-length
+            {"result_set": [{"identifier": "2SIB"}]},  # row 2 siblings
+            {"result_set": []},                         # row 2 full-length
+        ]
+
+        with patch("rcsb_enrichment.enrich._fetch_related_ligand_data", wraps=lambda c, p: self._stub_result(p)) as mock_fetch, \
+             patch("rcsb_enrichment.enrich.extract_direct_binders", return_value=[]):
+            for pdb_id in ("1ABC", "4XYZ"):
+                enrich_row(
+                    row={"PDBID": pdb_id, "Uniprot": "P12345"},
+                    client=client,
+                    pdb_col="PDBID",
+                    uniprot_col="Uniprot",
+                    seq_identity=0.9,
+                    max_related=5,
+                )
+
+        # No cache → 2SIB fetched once per input row = 2 total
+        assert mock_fetch.call_count == 2
+
+    def test_binders_cache_prevents_duplicate_binder_fetch(self):
+        """extract_direct_binders must be called at most once per related PDB ID."""
+        cache = {}
+        binders_cache = {}
+
+        with patch("rcsb_enrichment.enrich.extract_direct_binders", return_value=[]) as mock_binders, \
+             patch("rcsb_enrichment.enrich._fetch_related_ligand_data") as mock_fetch:
+
+            mock_fetch.return_value = {
+                "pdb_id": "2SIB", "entry_quality": {}, "ligand_metrics": [],
+                "peptide_entities": [], "has_ligands": False,
+                "species": "", "entity_names": "", "structure_quality": "",
+            }
+
+            client = MagicMock()
+            client.get.return_value = None   # entry-level 404 → empty quality → skip structure
+            client.post.return_value = {"result_set": [{"identifier": "2SIB"}]}
+
+            for pdb_id in ("1ABC", "4XYZ"):
+                enrich_row(
+                    row={"PDBID": pdb_id, "Uniprot": "P12345"},
+                    client=client,
+                    pdb_col="PDBID",
+                    uniprot_col="Uniprot",
+                    seq_identity=0.9,
+                    max_related=5,
+                    related_data_cache=cache,
+                    binders_cache=binders_cache,
+                )
+
+        # 2SIB should appear in binders_cache and mock_binders called once
+        assert "2SIB" in binders_cache
+        assert mock_binders.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# all_related_pdb_ids / all_fulllength_pdb_ids columns
+# ---------------------------------------------------------------------------
+
+class TestAllRelatedPdbIdsCols:
+    """all_related_pdb_ids and all_fulllength_pdb_ids must list every PDB ID
+    returned by the search, not just those with meaningful ligands.
+    """
+
+    def _entry_data(self, polymer_ids=None, np_ids=None):
+        return {
+            "exptl": [{"method": "X-RAY DIFFRACTION"}],
+            "rcsb_entry_info": {"diffrn_resolution_high": {"value": 2.0}, "nonpolymer_bound_components": []},
+            "refine": [],
+            "pdbx_vrpt_summary_geometry": [],
+            "pdbx_vrpt_summary_diffraction": [],
+            "rcsb_entry_container_identifiers": {
+                "polymer_entity_ids": polymer_ids or ["1"],
+                "non_polymer_entity_ids": np_ids or [],
+            },
+        }
+
+    def _poly_entity(self, seq="A" * 100):
+        return {
+            "entity_poly": {"rcsb_entity_polymer_type": "Protein", "pdbx_seq_one_letter_code_can": seq},
+            "rcsb_polymer_entity_container_identifiers": {"uniprot_ids": ["P12345"], "bird_id": None},
+            "rcsb_polymer_entity": {"pdbx_description": "Test protein"},
+            "rcsb_entity_source_organism": [],
+            "rcsb_target_cofactors": [],
+            "rcsb_polymer_entity_feature": [],
+        }
+
+    def _stub_result(self, pdb_id):
+        return {
+            "pdb_id": pdb_id, "entry_quality": {}, "ligand_metrics": [],
+            "peptide_entities": [], "has_ligands": False,
+            "species": "", "entity_names": "", "structure_quality": "",
+        }
+
+    def test_all_related_pdb_ids_contains_all_search_results(self):
+        client = MagicMock()
+        client.get.side_effect = [
+            self._entry_data(), self._poly_entity(), {"1abc": []},  # primary row
+        ]
+        client.post.side_effect = [
+            {"result_set": [{"identifier": "2SIB"}, {"identifier": "3SIB"}]},  # siblings
+            {"result_set": []},                                                  # full-length
+        ]
+
+        with patch("rcsb_enrichment.enrich._fetch_related_ligand_data", wraps=lambda c, p: self._stub_result(p)), \
+             patch("rcsb_enrichment.enrich.extract_direct_binders", return_value=[]):
+            result = enrich_row(
+                row={"PDBID": "1ABC", "Uniprot": "P12345"},
+                client=client,
+                pdb_col="PDBID",
+                uniprot_col="Uniprot",
+                seq_identity=0.9,
+                max_related=25,
+            )
+
+        assert "2SIB" in result["all_related_pdb_ids"]
+        assert "3SIB" in result["all_related_pdb_ids"]
+
+    def test_all_related_excludes_input_pdb_self(self):
+        client = MagicMock()
+        client.get.side_effect = [
+            self._entry_data(), self._poly_entity(), {"1abc": []},
+        ]
+        # Search returns the query itself plus a genuine sibling
+        client.post.side_effect = [
+            {"result_set": [{"identifier": "1ABC"}, {"identifier": "2SIB"}]},
+            {"result_set": []},
+        ]
+
+        with patch("rcsb_enrichment.enrich._fetch_related_ligand_data") as mock_fetch, \
+             patch("rcsb_enrichment.enrich.extract_direct_binders", return_value=[]):
+            mock_fetch.return_value = {
+                "pdb_id": "2SIB", "entry_quality": {}, "ligand_metrics": [],
+                "peptide_entities": [], "has_ligands": False,
+                "species": "", "entity_names": "", "structure_quality": "",
+            }
+            result = enrich_row(
+                row={"PDBID": "1ABC", "Uniprot": "P12345"},
+                client=client,
+                pdb_col="PDBID",
+                uniprot_col="Uniprot",
+                seq_identity=0.9,
+                max_related=25,
+                input_pdb_ids=frozenset(["1ABC"]),
+            )
+
+        assert "1ABC" not in result["all_related_pdb_ids"]
+        assert "2SIB" in result["all_related_pdb_ids"]
