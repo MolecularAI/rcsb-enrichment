@@ -237,6 +237,7 @@ def get_ligand_quality(client: RCSBClient, pdb_id: str, nonpolymer_entity_ids: l
         container = entity_data.get("rcsb_nonpolymer_entity_container_identifiers") or {}
         comp_id = container.get("nonpolymer_comp_id") or eid
         instance_ids = container.get("asym_ids") or []
+        np_description = (entity_data.get("rcsb_nonpolymer_entity") or {}).get("pdbx_description") or ""
 
         for asym_id in instance_ids:
             inst = client.get(f"{RCSB_DATA}/nonpolymer_entity_instance/{pdb_id}/{asym_id}")
@@ -276,6 +277,7 @@ def get_ligand_quality(client: RCSBClient, pdb_id: str, nonpolymer_entity_ids: l
             results.append({
                 "ligand_id": comp_id,
                 "chain_id": asym_id,
+                "description": np_description,
                 "is_interesting": interesting,
                 "ligand_rscc": rscc,
                 "ligand_rsr": rsr,

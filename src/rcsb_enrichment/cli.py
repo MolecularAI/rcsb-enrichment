@@ -28,6 +28,7 @@ _AUGMENTED_COLS = (
     # Row metadata
     "row_type",
     "parent_pdb_id",
+    "entity_names",
     # Tag columns: single PDB ID set only on related-entry ligand sub-rows
     "related_pdb_ids",
     "fulllength_pdb_ids",
@@ -203,7 +204,15 @@ def main() -> None:
         enriched["_pdb_id"] = pdb_id
         enriched_rows.append(enriched)
 
-    all_output_cols = tuple(input_cols) + _AUGMENTED_COLS
+    # Place entity_names immediately after the PDB ID column; all other augmented cols follow.
+    _augmented_without_entity_names = tuple(c for c in _AUGMENTED_COLS if c != "entity_names")
+    pdb_col_idx = input_cols.index(pdb_col)
+    all_output_cols = (
+        tuple(input_cols[: pdb_col_idx + 1])
+        + ("entity_names",)
+        + tuple(input_cols[pdb_col_idx + 1 :])
+        + _augmented_without_entity_names
+    )
     final_rows = []
     # Track which (parent_pdb_id, source_pdb_id, ligand_id, chain_id) tuples have been emitted
     # to suppress exact duplicate sub-rows from duplicate input PDB IDs or repeated chains.
@@ -240,7 +249,7 @@ def main() -> None:
                 ligand_metrics=entry["ligand_metrics"],
                 peptide_entities=entry["peptide_entities"],
                 all_output_cols=all_output_cols,
-                tags={"related_pdb_ids": entry["pdb_id"], "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
+                tags={"related_pdb_ids": entry["pdb_id"], "entity_names": entry.get("entity_names", ""), "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
             ))
 
         # Full-length ligands — tagged in fulllength_pdb_ids with its crystal quality
@@ -250,7 +259,7 @@ def main() -> None:
                 ligand_metrics=entry["ligand_metrics"],
                 peptide_entities=entry["peptide_entities"],
                 all_output_cols=all_output_cols,
-                tags={"fulllength_pdb_ids": entry["pdb_id"], "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
+                tags={"fulllength_pdb_ids": entry["pdb_id"], "entity_names": entry.get("entity_names", ""), "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
             ))
 
     out_df = pd.DataFrame(final_rows, columns=list(all_output_cols))

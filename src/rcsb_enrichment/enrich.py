@@ -28,6 +28,30 @@ def _entity_matches_names(description: str, name_filters: list) -> bool:
     tokens = set(description.lower().split())
     return any(term.lower() in tokens for term in name_filters)
 
+
+def _collect_entity_names(entities: list, peptide_entities: list, ligand_metrics: list) -> str:
+    """Build a comma-separated list of all entity descriptions for a PDB entry.
+
+    Polymer descriptions come from entity['description'] (set by get_polymer_entities).
+    Non-polymer descriptions come from ligand_metric['description'] (set by get_ligand_quality).
+    Only unique, non-empty names are included; order is polymer entities first,
+    then non-polymer entities.
+    """
+    seen: set = set()
+    names: list = []
+    for e in list(entities) + list(peptide_entities):
+        d = e.get("description") or ""
+        if d and d not in seen:
+            seen.add(d)
+            names.append(d)
+    for m in ligand_metrics:
+        d = m.get("description") or ""
+        if d and d not in seen:
+            seen.add(d)
+            names.append(d)
+    return ",".join(names)
+
+
 _PDB_RE = re.compile(r"^[A-Z0-9]{4}$")
 
 # Columns that belong to ligand sub-rows only.  Primary rows leave these None.
@@ -91,6 +115,7 @@ def _fetch_related_ligand_data(client: RCSBClient, pdb_id: str) -> dict:
         ligand_metrics = get_ligand_quality(client, pdb_id, nonpolymer_entity_ids)
 
     peptide_entities = []
+    receptor_entities = []
     species = ""
     if entity_ids:
         all_entities = get_polymer_entities(client, pdb_id, entity_ids)
@@ -113,6 +138,8 @@ def _fetch_related_ligand_data(client: RCSBClient, pdb_id: str) -> dict:
         default=None,
     )
 
+    entity_names = _collect_entity_names(receptor_entities, peptide_entities, ligand_metrics)
+
     return {
         "pdb_id": pdb_id,
         "entry_quality": entry_quality,
@@ -120,6 +147,7 @@ def _fetch_related_ligand_data(client: RCSBClient, pdb_id: str) -> dict:
         "peptide_entities": peptide_entities,
         "has_ligands": has_ligands,
         "species": species,
+        "entity_names": entity_names,
         "structure_quality": iridium_score(entry_quality, _best_ligand_traffic),
     }
 
@@ -251,6 +279,8 @@ def enrich_row(
 
     species_labels = [e["species"] for e in entities if e.get("species")]
     result["species"] = ",".join(dict.fromkeys(species_labels))
+
+    result["entity_names"] = _collect_entity_names(entities, peptide_entities, ligand_metrics)
 
     _tl_order = {"good": 0, "fair": 1, "bad": 2}
     _best_ligand_traffic = min(

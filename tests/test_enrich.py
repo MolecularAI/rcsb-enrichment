@@ -5,6 +5,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from rcsb_enrichment.enrich import (
     LIGAND_DETAIL_COLS,
+    _collect_entity_names,
     _entity_matches_names,
     _fetch_related_ligand_data,
     _is_valid_pdb_id,
@@ -718,3 +719,145 @@ class TestEnrichRowEntityNameFilters:
         assert "P81947" in searched or "Q6B856" in searched, "tubulin IDs must be searched"
         assert "P63043" not in searched, "Stathmin-4 must not be searched"
         assert "E1BQ43" not in searched, "Tubulin-Tyrosine Ligase must not be searched"
+
+
+# ---------------------------------------------------------------------------
+# _collect_entity_names
+# ---------------------------------------------------------------------------
+
+class TestCollectEntityNames:
+    """Unit tests for the entity-name aggregation helper.
+
+    Covers polymer receptors, peptide ligands, non-polymer ligands, deduplication,
+    and ordering (polymer first, then non-polymer).
+    """
+
+    def test_polymer_descriptions_included(self):
+        entities = [{"description": "Tubulin alpha-1B chain"}, {"description": "Tubulin beta-2B chain"}]
+        assert _collect_entity_names(entities, [], []) == "Tubulin alpha-1B chain,Tubulin beta-2B chain"
+
+    def test_peptide_descriptions_included(self):
+        peptides = [{"description": "Short peptide inhibitor"}]
+        assert _collect_entity_names([], peptides, []) == "Short peptide inhibitor"
+
+    def test_nonpolymer_descriptions_included(self):
+        metrics = [{"description": "GUANOSINE-5'-TRIPHOSPHATE"}, {"description": "MAGNESIUM ION"}]
+        assert _collect_entity_names([], [], metrics) == "GUANOSINE-5'-TRIPHOSPHATE,MAGNESIUM ION"
+
+    def test_polymer_before_nonpolymer(self):
+        entities = [{"description": "HIV-1 Protease"}]
+        metrics = [{"description": "Indinavir"}]
+        result = _collect_entity_names(entities, [], metrics)
+        assert result.index("HIV-1 Protease") < result.index("Indinavir")
+
+    def test_duplicates_deduplicated(self):
+        # same description across polymer chains (e.g. homodimer)
+        entities = [{"description": "Kinase domain"}, {"description": "Kinase domain"}]
+        assert _collect_entity_names(entities, [], []) == "Kinase domain"
+
+    def test_empty_descriptions_skipped(self):
+        entities = [{"description": ""}, {"description": "Kinase domain"}]
+        assert _collect_entity_names(entities, [], []) == "Kinase domain"
+
+    def test_missing_description_key_skipped(self):
+        entities = [{"uniprot_ids": ["P12345"]}, {"description": "Kinase domain"}]
+        assert _collect_entity_names(entities, [], []) == "Kinase domain"
+
+    def test_all_empty_returns_empty_string(self):
+        assert _collect_entity_names([], [], []) == ""
+
+    def test_5s5v_like_four_entities(self):
+        """All four 5S5V polymer entities; no non-polymer."""
+        entities = [
+            {"description": "Tubulin alpha-1B chain"},
+            {"description": "Tubulin beta-2B chain"},
+            {"description": "Stathmin-4"},
+            {"description": "Tubulin-Tyrosine Ligase"},
+        ]
+        result = _collect_entity_names(entities, [], [])
+        assert result == (
+            "Tubulin alpha-1B chain,Tubulin beta-2B chain,"
+            "Stathmin-4,Tubulin-Tyrosine Ligase"
+        )
+
+
+# ---------------------------------------------------------------------------
+# entity_names propagation through enrich_row and related-entry sub-rows
+# ---------------------------------------------------------------------------
+
+class TestEntityNamesInEnrichRow:
+    """Verify entity_names is set on primary rows from enrich_row, and that
+    _fetch_related_ligand_data returns it so cli.py can propagate it to
+    sibling/full-length sub-rows.
+
+    Test CSV used: data/examples/test_entity_filter.csv
+        PDBID,Uniprot
+        5S5V,
+    """
+
+    def _entry_data(self, polymer_ids, np_ids=None):
+        return {
+            "exptl": [{"method": "X-RAY DIFFRACTION"}],
+            "rcsb_entry_info": {"diffrn_resolution_high": {"value": 2.0}, "nonpolymer_bound_components": []},
+            "refine": [],
+            "pdbx_vrpt_summary_geometry": [],
+            "pdbx_vrpt_summary_diffraction": [],
+            "rcsb_entry_container_identifiers": {
+                "polymer_entity_ids": polymer_ids,
+                "non_polymer_entity_ids": np_ids or [],
+            },
+        }
+
+    def _poly_entity(self, uniprot_id, description, seq="A" * 100):
+        return {
+            "entity_poly": {"rcsb_entity_polymer_type": "Protein", "pdbx_seq_one_letter_code_can": seq},
+            "rcsb_polymer_entity_container_identifiers": {"uniprot_ids": [uniprot_id], "bird_id": None},
+            "rcsb_polymer_entity": {"pdbx_description": description},
+            "rcsb_entity_source_organism": [],
+            "rcsb_target_cofactors": [],
+            "rcsb_polymer_entity_feature": [],
+        }
+
+    def test_entity_names_on_primary_row(self):
+        client = MagicMock()
+        client.get.side_effect = [
+            self._entry_data(["1", "2"]),
+            self._poly_entity("P81947", "Tubulin alpha-1B chain"),
+            self._poly_entity("Q6B856", "Tubulin beta-2B chain"),
+            {"5s5v": []},  # PDBe
+        ]
+        client.post.return_value = {"result_set": []}
+        result = enrich_row(
+            row={"PDBID": "5S5V", "Uniprot": ""},
+            client=client,
+            pdb_col="PDBID",
+            uniprot_col="Uniprot",
+            seq_identity=0.9,
+            max_related=5,
+        )
+        assert result["entity_names"] == "Tubulin alpha-1B chain,Tubulin beta-2B chain"
+
+    def test_entity_names_empty_on_404(self):
+        client = MagicMock()
+        client.get.return_value = None
+        client.post.return_value = {"result_set": []}
+        result = enrich_row(
+            row={"PDBID": "1ABC", "Uniprot": ""},
+            client=client,
+            pdb_col="PDBID",
+            uniprot_col="Uniprot",
+            seq_identity=0.9,
+            max_related=5,
+        )
+        assert result["entity_names"] == ""
+
+    def test_fetch_related_ligand_data_returns_entity_names(self):
+        """_fetch_related_ligand_data must include entity_names in its return dict."""
+        client = MagicMock()
+        client.get.side_effect = [
+            self._entry_data(["1"], np_ids=[]),
+            self._poly_entity("P12345", "HIV-1 Protease"),
+        ]
+        data = _fetch_related_ligand_data(client, "1HSG")
+        assert "entity_names" in data
+        assert "HIV-1 Protease" in data["entity_names"]
