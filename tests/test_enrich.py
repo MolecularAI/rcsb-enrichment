@@ -5,6 +5,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from rcsb_enrichment.enrich import (
     LIGAND_DETAIL_COLS,
+    _entity_matches_names,
     _fetch_related_ligand_data,
     _is_valid_pdb_id,
     _normalise_pdb_id,
@@ -558,3 +559,162 @@ class TestBuildLigandRowsTags:
             tags={"related_pdb_ids": "4SIB"}
         )
         assert rows[0]["parent_pdb_id"] == "1ABC"
+
+
+# ---------------------------------------------------------------------------
+# _entity_matches_names
+# ---------------------------------------------------------------------------
+
+class TestEntityMatchesNames:
+    """Unit tests for the whitespace-token entity name filter.
+
+    The filter is intentionally conservative: 'Tubulin' must not match
+    'Tubulin-Tyrosine Ligase' because hyphenated words are single tokens.
+    """
+
+    def test_exact_word_matches(self):
+        assert _entity_matches_names("Tubulin alpha-1B chain", ["Tubulin"])
+
+    def test_case_insensitive(self):
+        assert _entity_matches_names("Tubulin alpha-1B chain", ["tubulin"])
+        assert _entity_matches_names("tubulin alpha-1b chain", ["Tubulin"])
+
+    def test_hyphenated_compound_does_not_match_prefix(self):
+        # 'Tubulin-Tyrosine' is one token — 'Tubulin' alone must NOT match
+        assert not _entity_matches_names("Tubulin-Tyrosine Ligase", ["Tubulin"])
+
+    def test_unrelated_description_does_not_match(self):
+        assert not _entity_matches_names("Stathmin-4", ["Tubulin"])
+
+    def test_multiple_filters_any_match_is_sufficient(self):
+        assert _entity_matches_names("Stathmin-4", ["Tubulin", "Stathmin-4"])
+
+    def test_empty_filters_list_returns_false(self):
+        assert not _entity_matches_names("Tubulin alpha chain", [])
+
+    def test_empty_description_returns_false(self):
+        assert not _entity_matches_names("", ["Tubulin"])
+
+    def test_5s5v_like_descriptions(self):
+        """Replicate the four 5S5V entity descriptions; filter 'Tubulin' → exactly 2 matches."""
+        descriptions = [
+            "Tubulin alpha-1B chain",
+            "Tubulin beta-2B chain",
+            "Stathmin-4",
+            "Tubulin-Tyrosine Ligase",
+        ]
+        matched = [d for d in descriptions if _entity_matches_names(d, ["Tubulin"])]
+        assert matched == ["Tubulin alpha-1B chain", "Tubulin beta-2B chain"]
+
+
+# ---------------------------------------------------------------------------
+# enrich_row entity_name_filters integration
+# ---------------------------------------------------------------------------
+
+class TestEnrichRowEntityNameFilters:
+    """5S5V has four protein entities (alpha-tubulin, beta-tubulin, Stathmin-4,
+    Tubulin-Tyrosine Ligase).  With filter ['Tubulin'] only the two tubulin
+    chains should be retained as receptor entities, affecting which UniProt IDs
+    are collected and which are searched for related entries.
+
+    All API calls are mocked; mock data mirrors the real 5S5V entity layout.
+    """
+
+    # CSV used in this test: data/examples/test_entity_filter.csv
+    #   PDBID,Uniprot
+    #   5S5V,
+
+    def _entry_data(self):
+        return {
+            "exptl": [{"method": "X-RAY DIFFRACTION"}],
+            "rcsb_entry_info": {"diffrn_resolution_high": {"value": 2.3}, "nonpolymer_bound_components": []},
+            "refine": [{"ls_R_factor_R_work": 0.19, "ls_R_factor_R_free": 0.23}],
+            "pdbx_vrpt_summary_geometry": [
+                {"clashscore": 3.0, "percent_ramachandran_outliers": 0.2,
+                 "percent_rotamer_outliers": 1.0, "bonds_RMSZ": 0.9, "angles_RMSZ": 1.1}
+            ],
+            "pdbx_vrpt_summary_diffraction": [{"percent_RSRZ_outliers": 4.0}],
+            "rcsb_entry_container_identifiers": {
+                "polymer_entity_ids": ["1", "2", "3", "4"],
+                "non_polymer_entity_ids": [],
+            },
+        }
+
+    def _entity(self, uniprot_id, description, seq="A" * 200):
+        return {
+            "entity_poly": {"rcsb_entity_polymer_type": "Protein", "pdbx_seq_one_letter_code_can": seq},
+            "rcsb_polymer_entity_container_identifiers": {"uniprot_ids": [uniprot_id], "bird_id": None},
+            "rcsb_polymer_entity": {"pdbx_description": description},
+            "rcsb_entity_source_organism": [],
+            "rcsb_target_cofactors": [],
+            "rcsb_polymer_entity_feature": [],
+        }
+
+    def _make_client(self):
+        client = MagicMock()
+        client.get.side_effect = [
+            self._entry_data(),
+            self._entity("P81947", "Tubulin alpha-1B chain"),   # entity 1 — kept
+            self._entity("Q6B856", "Tubulin beta-2B chain"),    # entity 2 — kept
+            self._entity("P63043", "Stathmin-4"),               # entity 3 — filtered out
+            self._entity("E1BQ43", "Tubulin-Tyrosine Ligase"),  # entity 4 — filtered out
+            {"5s5v": []},                                       # PDBe binding sites
+        ]
+        client.post.return_value = {"result_set": []}
+        return client
+
+    def test_filter_tubulin_retains_two_entities(self):
+        client = self._make_client()
+        result = enrich_row(
+            row={"PDBID": "5S5V", "Uniprot": ""},
+            client=client,
+            pdb_col="PDBID",
+            uniprot_col="Uniprot",
+            seq_identity=0.9,
+            max_related=5,
+            entity_name_filters=["Tubulin"],
+        )
+        resolved = result["Uniprot"]
+        assert "P81947" in resolved, "alpha-tubulin UniProt must be resolved"
+        assert "Q6B856" in resolved, "beta-tubulin UniProt must be resolved"
+        assert "P63043" not in resolved, "Stathmin-4 must be filtered out"
+        assert "E1BQ43" not in resolved, "Tubulin-Tyrosine Ligase must be filtered out"
+
+    def test_no_filter_retains_all_four_entities(self):
+        client = self._make_client()
+        result = enrich_row(
+            row={"PDBID": "5S5V", "Uniprot": ""},
+            client=client,
+            pdb_col="PDBID",
+            uniprot_col="Uniprot",
+            seq_identity=0.9,
+            max_related=5,
+            entity_name_filters=None,
+        )
+        resolved = result["Uniprot"]
+        assert "P81947" in resolved
+        assert "Q6B856" in resolved
+        assert "P63043" in resolved
+        assert "E1BQ43" in resolved
+
+    def test_filter_only_searches_matching_uniprots(self):
+        """Only the two tubulin UniProt IDs should appear in any search API call."""
+        client = self._make_client()
+        enrich_row(
+            row={"PDBID": "5S5V", "Uniprot": ""},
+            client=client,
+            pdb_col="PDBID",
+            uniprot_col="Uniprot",
+            seq_identity=0.9,
+            max_related=5,
+            entity_name_filters=["Tubulin"],
+        )
+        searched = set()
+        for call in client.post.call_args_list:
+            payload_str = str(call.args[1] if len(call.args) > 1 else call.kwargs.get("json", {}))
+            for uid in ("P81947", "Q6B856", "P63043", "E1BQ43"):
+                if uid in payload_str:
+                    searched.add(uid)
+        assert "P81947" in searched or "Q6B856" in searched, "tubulin IDs must be searched"
+        assert "P63043" not in searched, "Stathmin-4 must not be searched"
+        assert "E1BQ43" not in searched, "Tubulin-Tyrosine Ligase must not be searched"

@@ -126,6 +126,16 @@ def main() -> None:
         default=0.1,
         help="Seconds to wait between API requests (default: 0.1)",
     )
+    parser.add_argument(
+        "--entity-names",
+        default=None,
+        help=(
+            "Comma-separated list of molecule name substrings (whitespace-token match). "
+            "When set, only polymer entities whose description contains at least one of "
+            "the terms as a whole word are processed; others are ignored. "
+            "Example: --entity-names 'Tubulin,Kinase'"
+        ),
+    )
     args = parser.parse_args()
 
     df = pd.read_csv(args.input)
@@ -133,11 +143,18 @@ def main() -> None:
     uniprot_col = detect_uniprot_col(df.columns.tolist(), args.uniprot_col)
     input_cols = df.columns.tolist()
 
+    entity_name_filters = (
+        [t.strip() for t in args.entity_names.split(",") if t.strip()]
+        if args.entity_names
+        else None
+    )
+
     log.info(
-        "Input: %d rows | PDB column: '%s' | UniProt column: %s",
+        "Input: %d rows | PDB column: '%s' | UniProt column: %s | Entity name filter: %s",
         len(df),
         pdb_col,
         uniprot_col or "none",
+        ",".join(entity_name_filters) if entity_name_filters else "none",
     )
 
     input_pdb_ids = frozenset(
@@ -170,6 +187,7 @@ def main() -> None:
                 seq_identity=args.seq_identity,
                 max_related=args.max_related,
                 input_pdb_ids=input_pdb_ids,
+                entity_name_filters=entity_name_filters,
             )
         except Exception as exc:
             log.error("[%s] Failed: %s", pdb_id, exc, exc_info=True)

@@ -19,6 +19,15 @@ log = logging.getLogger(__name__)
 
 _MAX_RELATED_BINDER_ENTRIES = 5  # cap API calls for sibling/full-length binder lookups
 
+
+def _entity_matches_names(description: str, name_filters: list) -> bool:
+    """Return True if any filter term appears as a whole whitespace-delimited token
+    in *description* (case-insensitive).  Hyphenated words like 'Tubulin-Tyrosine'
+    are a single token and will NOT match 'Tubulin'.
+    """
+    tokens = set(description.lower().split())
+    return any(term.lower() in tokens for term in name_filters)
+
 _PDB_RE = re.compile(r"^[A-Z0-9]{4}$")
 
 # Columns that belong to ligand sub-rows only.  Primary rows leave these None.
@@ -173,6 +182,7 @@ def enrich_row(
     seq_identity: float,
     max_related: int,
     input_pdb_ids: frozenset = frozenset(),
+    entity_name_filters: list | None = None,
 ) -> dict:
     pdb_id = _normalise_pdb_id(str(row[pdb_col]).strip()).upper()
     result = dict(row)
@@ -196,6 +206,17 @@ def enrich_row(
         all_entities = get_polymer_entities(client, pdb_id, entity_ids)
         peptide_entities = [e for e in all_entities if e.get("is_peptide_ligand")]
         entities = [e for e in all_entities if not e.get("is_peptide_ligand")]
+
+        if entity_name_filters:
+            before = len(entities)
+            entities = [
+                e for e in entities
+                if _entity_matches_names(e.get("description", ""), entity_name_filters)
+            ]
+            log.info(
+                "[%s] Entity name filter %s: kept %d of %d receptor entities",
+                pdb_id, entity_name_filters, len(entities), before,
+            )
 
         if nonpolymer_entity_ids:
             log.info("[%s] Fetching ligand quality for %d entities", pdb_id, len(nonpolymer_entity_ids))

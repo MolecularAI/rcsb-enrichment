@@ -23,6 +23,7 @@ def get_polymer_entities(client: RCSBClient, pdb_id: str, entity_ids: list) -> l
         container = data.get("rcsb_polymer_entity_container_identifiers") or {}
         entity["uniprot_ids"] = container.get("uniprot_ids") or []
         entity["sequence"] = entity_poly.get("pdbx_seq_one_letter_code_can") or ""
+        entity["description"] = (data.get("rcsb_polymer_entity") or {}).get("pdbx_description") or ""
 
         src_organisms = data.get("rcsb_entity_source_organism") or []
         entity["species"] = src_organisms[0].get("ncbi_scientific_name") if src_organisms else None
