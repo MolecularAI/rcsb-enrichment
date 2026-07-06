@@ -140,6 +140,7 @@ def _fetch_related_ligand_data(client: RCSBClient, pdb_id: str) -> dict:
     )
 
     entity_names = _collect_entity_names(receptor_entities, peptide_entities, ligand_metrics)
+    _grade, _lig_used = iridium_score(entry_quality, _best_ligand_traffic)
 
     return {
         "pdb_id": pdb_id,
@@ -149,7 +150,8 @@ def _fetch_related_ligand_data(client: RCSBClient, pdb_id: str) -> dict:
         "has_ligands": has_ligands,
         "species": species,
         "entity_names": entity_names,
-        "structure_quality": iridium_score(entry_quality, _best_ligand_traffic),
+        "structure_quality": _grade,
+        "structure_quality_ligand_used": _lig_used,
     }
 
 
@@ -203,6 +205,30 @@ def build_ligand_rows(
     return rows
 
 
+def build_related_row(
+    pdb_id: str,
+    entry_data: dict,
+    all_output_cols: tuple,
+    tags: dict = None,
+) -> dict:
+    """Return a single row for a related entry that has no qualifying ligand.
+
+    Carries structure quality metrics and provenance tags only; all ligand-
+    specific columns are None.  row_type is 'related'.
+    """
+    row = {col: None for col in all_output_cols}
+    row["row_type"] = "related"
+    row["parent_pdb_id"] = pdb_id
+    row["structure_quality"] = entry_data.get("structure_quality")
+    row["structure_quality_ligand_used"] = entry_data.get("structure_quality_ligand_used")
+    row["species"] = entry_data.get("species")
+    row["entity_names"] = entry_data.get("entity_names", "")
+    row.update(entry_data.get("entry_quality", {}))
+    if tags:
+        row.update(tags)
+    return row
+
+
 def enrich_row(
     row: dict,
     client: RCSBClient,
@@ -215,6 +241,7 @@ def enrich_row(
     related_data_cache: dict | None = None,
     binders_cache: dict | None = None,
     uniprot_search_cache: dict | None = None,
+    include_all_related: bool = False,
 ) -> dict:
     pdb_id = _normalise_pdb_id(str(row[pdb_col]).strip()).upper()
     result = dict(row)
@@ -292,7 +319,9 @@ def enrich_row(
         key=lambda v: _tl_order.get(v, 3),
         default=None,
     )
-    result["structure_quality"] = iridium_score(quality, _best_ligand_traffic)
+    _grade, _lig_used = iridium_score(quality, _best_ligand_traffic)
+    result["structure_quality"] = _grade
+    result["structure_quality_ligand_used"] = _lig_used
 
     # Collect UniProt IDs: from input column first, then from resolved entities
     all_uniprot: list = []
@@ -402,6 +431,7 @@ def enrich_row(
         return _fetch_related_ligand_data(client, pid)
 
     fragment_no_ligand: list = []
+    fragment_no_ligand_entries: list = []
     fragment_ligand_entries: list = []
     for frid in fragment_ids[:max_related]:
         log.info("[%s] Checking fragment %s for ligands", pdb_id, frid)
@@ -410,8 +440,11 @@ def enrich_row(
             fragment_ligand_entries.append(data)
         else:
             fragment_no_ligand.append(frid)
+            if include_all_related:
+                fragment_no_ligand_entries.append(data)
 
     sibling_no_ligand: list = []
+    sibling_no_ligand_entries: list = []
     sibling_ligand_entries: list = []
     for sid in sibling_ids[:max_related]:
         log.info("[%s] Checking sibling %s for ligands", pdb_id, sid)
@@ -420,8 +453,11 @@ def enrich_row(
             sibling_ligand_entries.append(data)
         else:
             sibling_no_ligand.append(sid)
+            if include_all_related:
+                sibling_no_ligand_entries.append(data)
 
     fulllength_no_ligand: list = []
+    fulllength_no_ligand_entries: list = []
     fulllength_ligand_entries: list = []
     for fid in fulllength_ids[:max_related]:
         log.info("[%s] Checking full-length %s for ligands", pdb_id, fid)
@@ -430,6 +466,8 @@ def enrich_row(
             fulllength_ligand_entries.append(data)
         else:
             fulllength_no_ligand.append(fid)
+            if include_all_related:
+                fulllength_no_ligand_entries.append(data)
 
     result["all_fragment_pdb_ids"] = ",".join(fragment_ids)
     result["all_sibling_pdb_ids"] = ",".join(sibling_ids)
@@ -555,7 +593,10 @@ def enrich_row(
     result["_ligand_metrics"] = ligand_metrics
     result["_peptide_entities"] = peptide_entities
     result["_fragment_ligand_entries"] = fragment_ligand_entries
+    result["_fragment_no_ligand_entries"] = fragment_no_ligand_entries
     result["_sibling_ligand_entries"] = sibling_ligand_entries
+    result["_sibling_no_ligand_entries"] = sibling_no_ligand_entries
     result["_fulllength_ligand_entries"] = fulllength_ligand_entries
+    result["_fulllength_no_ligand_entries"] = fulllength_no_ligand_entries
 
     return result

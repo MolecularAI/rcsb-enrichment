@@ -130,12 +130,13 @@ def traffic_light(
     return "good" if mean < 0.67 else ("fair" if mean < 1.33 else "bad")
 
 
-def iridium_score(quality: dict, best_ligand_traffic: str | None) -> str:
+def iridium_score(quality: dict, best_ligand_traffic: str | None) -> tuple:
     """Composite structure quality grade analogous to OpenEye Iridium (HT/MT/LT).
 
     Combines global crystallographic metrics (resolution, R-free, clashscore,
     Ramachandran/rotamer outliers, RSRZ) with ligand binding-site quality.
-    Returns "good", "fair", or "bad".
+    Returns (grade, ligand_used) where grade is "good"/"fair"/"bad"/"" and
+    ligand_used is True when the ligand traffic-light contributed to the score.
 
     Scoring table (0=good, 1=fair, 2=bad):
       resolution_A          ≤2.5→0  ≤3.0→1  >3.0→2   (X-ray only)
@@ -144,7 +145,7 @@ def iridium_score(quality: dict, best_ligand_traffic: str | None) -> str:
       ramachandran_outliers ≤0.5%→0 ≤2.0%→1 >2.0%→2
       rotamer_outliers      ≤1.0%→0 ≤5.0%→1 >5.0%→2
       rsrz_outliers         ≤5%→0   ≤10%→1  >10%→2   (X-ray + EDS only)
-      best ligand traffic   good→0  fair→1  bad→2    (weight 2×)
+      best ligand traffic   good→0  fair→1  bad→2    (weight 2×, only when present)
 
     Missing metrics are excluded from the weighted mean.
     Thresholds: mean <0.67→"good", <1.33→"fair", ≥1.33→"bad".
@@ -178,15 +179,17 @@ def iridium_score(quality: dict, best_ligand_traffic: str | None) -> str:
     if rsrz is not None:
         weighted_scores.append((0 if rsrz <= 5.0 else (1 if rsrz <= 10.0 else 2), 1))
 
-    if best_ligand_traffic in ("good", "fair", "bad"):
+    ligand_used = best_ligand_traffic in ("good", "fair", "bad")
+    if ligand_used:
         lig_score = {"good": 0, "fair": 1, "bad": 2}[best_ligand_traffic]
         weighted_scores.append((lig_score, 2))
 
     if not weighted_scores:
-        return ""
+        return "", False
     total_weight = sum(w for _, w in weighted_scores)
     mean = sum(s * w for s, w in weighted_scores) / total_weight
-    return "good" if mean < 0.67 else ("fair" if mean < 1.33 else "bad")
+    grade = "good" if mean < 0.67 else ("fair" if mean < 1.33 else "bad")
+    return grade, ligand_used
 
 
 def _get_contact_residue_outlier_fraction(

@@ -12,6 +12,7 @@ from .enrich import (
     _CRYSTAL_QUALITY_COLS,
     _normalise_pdb_id,
     build_ligand_rows,
+    build_related_row,
     enrich_row,
 )
 
@@ -29,12 +30,13 @@ _AUGMENTED_COLS = (
     "row_type",
     "parent_pdb_id",
     "entity_names",
-    # Tag columns: single PDB ID set only on related-entry ligand sub-rows
+    # Tag columns: single PDB ID set only on related-entry ligand/related sub-rows
     "fragment_pdb_ids",
     "sibling_pdb_ids",
     "fulllength_pdb_ids",
     "species",
     "structure_quality",
+    "structure_quality_ligand_used",
     "exp_method",
     # Structural quality (primary rows)
     "resolution_A",
@@ -76,7 +78,9 @@ _AUGMENTED_COLS_SET = frozenset(_AUGMENTED_COLS)
 _INTERNAL_KEYS = {
     "_seq_len", "_resolved_uniprot_ids",
     "_ligand_metrics", "_peptide_entities",
-    "_fragment_ligand_entries", "_sibling_ligand_entries", "_fulllength_ligand_entries",
+    "_fragment_ligand_entries", "_fragment_no_ligand_entries",
+    "_sibling_ligand_entries", "_sibling_no_ligand_entries",
+    "_fulllength_ligand_entries", "_fulllength_no_ligand_entries",
 }
 
 
@@ -126,7 +130,21 @@ def main() -> None:
         "--max-related",
         type=int,
         default=25,
-        help="Max related PDB entries to return (default: 25)",
+        help=(
+            "Max related PDB entries to fetch ligand/binder detail for (default: 25). "
+            "All found IDs are always written to all_*_pdb_ids columns regardless of this limit."
+        ),
+    )
+    parser.add_argument(
+        "--include-all-related",
+        action="store_true",
+        default=False,
+        help=(
+            "Include all fetched related entries as rows even when they have no "
+            "interesting ligands. Such rows carry structure quality metrics only "
+            "(row_type='related'). Without this flag only entries with qualifying "
+            "ligands generate rows."
+        ),
     )
     parser.add_argument(
         "--delay",
@@ -204,6 +222,7 @@ def main() -> None:
                 related_data_cache=related_data_cache,
                 binders_cache=binders_cache,
                 uniprot_search_cache=uniprot_search_cache,
+                include_all_related=args.include_all_related,
             )
         except Exception as exc:
             log.error("[%s] Failed: %s", pdb_id, exc, exc_info=True)
@@ -246,11 +265,24 @@ def main() -> None:
                 emitted_ligand_keys.add(key)
                 final_rows.append(r)
 
+    def _entry_tags(entry: dict, pdb_id_key: str) -> dict:
+        return {
+            pdb_id_key: entry["pdb_id"],
+            "entity_names": entry.get("entity_names", ""),
+            "species": entry.get("species", ""),
+            "structure_quality": entry.get("structure_quality", ""),
+            "structure_quality_ligand_used": entry.get("structure_quality_ligand_used"),
+            **entry.get("entry_quality", {}),
+        }
+
     for row in enriched_rows:
         pdb_id_for_ligands = row.pop("_pdb_id", "")
         fragment_entries = row.pop("_fragment_ligand_entries", []) or []
+        fragment_no_ligand_entries = row.pop("_fragment_no_ligand_entries", []) or []
         sibling_entries = row.pop("_sibling_ligand_entries", []) or []
+        sibling_no_ligand_entries = row.pop("_sibling_no_ligand_entries", []) or []
         fulllength_entries = row.pop("_fulllength_ligand_entries", []) or []
+        fulllength_no_ligand_entries = row.pop("_fulllength_no_ligand_entries", []) or []
         for key in _INTERNAL_KEYS:
             row.pop(key, None)
 
@@ -265,8 +297,17 @@ def main() -> None:
                 ligand_metrics=entry["ligand_metrics"],
                 peptide_entities=entry["peptide_entities"],
                 all_output_cols=all_output_cols,
-                tags={"fragment_pdb_ids": entry["pdb_id"], "entity_names": entry.get("entity_names", ""), "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
+                tags=_entry_tags(entry, "fragment_pdb_ids"),
             ))
+
+        # Fragment entries with no qualifying ligand (only when --include-all-related)
+        for entry in fragment_no_ligand_entries:
+            tags = _entry_tags(entry, "fragment_pdb_ids")
+            r = build_related_row(pdb_id_for_ligands, entry, all_output_cols, tags=tags)
+            key = (r.get("parent_pdb_id"), r.get("fragment_pdb_ids"), None, None, None)
+            if key not in emitted_ligand_keys:
+                emitted_ligand_keys.add(key)
+                final_rows.append(r)
 
         # Sibling ligands — tagged with the sibling's PDB ID and its crystal quality
         for entry in sibling_entries:
@@ -275,8 +316,17 @@ def main() -> None:
                 ligand_metrics=entry["ligand_metrics"],
                 peptide_entities=entry["peptide_entities"],
                 all_output_cols=all_output_cols,
-                tags={"sibling_pdb_ids": entry["pdb_id"], "entity_names": entry.get("entity_names", ""), "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
+                tags=_entry_tags(entry, "sibling_pdb_ids"),
             ))
+
+        # Sibling entries with no qualifying ligand (only when --include-all-related)
+        for entry in sibling_no_ligand_entries:
+            tags = _entry_tags(entry, "sibling_pdb_ids")
+            r = build_related_row(pdb_id_for_ligands, entry, all_output_cols, tags=tags)
+            key = (r.get("parent_pdb_id"), r.get("sibling_pdb_ids"), None, None, None)
+            if key not in emitted_ligand_keys:
+                emitted_ligand_keys.add(key)
+                final_rows.append(r)
 
         # Full-length ligands — tagged in fulllength_pdb_ids with its crystal quality
         for entry in fulllength_entries:
@@ -285,8 +335,17 @@ def main() -> None:
                 ligand_metrics=entry["ligand_metrics"],
                 peptide_entities=entry["peptide_entities"],
                 all_output_cols=all_output_cols,
-                tags={"fulllength_pdb_ids": entry["pdb_id"], "entity_names": entry.get("entity_names", ""), "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
+                tags=_entry_tags(entry, "fulllength_pdb_ids"),
             ))
+
+        # Full-length entries with no qualifying ligand (only when --include-all-related)
+        for entry in fulllength_no_ligand_entries:
+            tags = _entry_tags(entry, "fulllength_pdb_ids")
+            r = build_related_row(pdb_id_for_ligands, entry, all_output_cols, tags=tags)
+            key = (r.get("parent_pdb_id"), r.get("fulllength_pdb_ids"), None, None, None)
+            if key not in emitted_ligand_keys:
+                emitted_ligand_keys.add(key)
+                final_rows.append(r)
 
     out_df = pd.DataFrame(final_rows, columns=list(all_output_cols))
     out_df.to_csv(args.output, index=False)
