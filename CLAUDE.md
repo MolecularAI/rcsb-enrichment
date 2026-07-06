@@ -87,11 +87,16 @@ These were confirmed by live API inspection; do not change without re-verifying.
 
 ## Design decisions
 
-### Related entry split: siblings vs full-length (1.4× chain length threshold)
-**Decision:** entries whose deposited chain length exceeds the query sequence length × 1.4 are classified as "full-length" (`fulllength_pdb_ids`); shorter entries are "siblings" (`related_pdb_ids`).  
-**Why:** a common PDB pattern is a fragment crystallised in isolation plus the same protein as a subunit in a larger complex. Mixing them misleads SAR analysis. The 1.4× factor gives a ~40% buffer for expression tags, disordered termini, and minor construct differences.  
-**Implementation:** two RCSB search requests with `entity_poly.rcsb_sample_sequence_length` `less_or_equal`/`greater` filters — no per-hit extra fetches.  
-**Rule when only one class populated:** use `related_pdb_ids` (column 1).
+### Related entry three-way split: fragment / sibling / full-length
+**Decision:** same-UniProt entries are classified into three groups by deposited chain length relative to the query sequence:
+- **Fragment** (`fragment_pdb_ids`): chain length < query × 0.8 — a subset/domain of the query.
+- **Sibling** (`sibling_pdb_ids`): chain length in [query × 0.8, query × 1.4] — same construct or minor variant.
+- **Full-length** (`fulllength_pdb_ids`): chain length > query × 1.4 — query is a domain/fragment of this entry.
+
+**Why:** a query that is itself a fragment (e.g. a domain construct) may have PDB depositions of the isolated domain (sibling), the full protein (full-length), and even shorter sub-domain constructs (fragment). Mixing all three misleads SAR analysis; the three-way split makes the relationship explicit.  
+**Thresholds:** upper 1.4× gives ~40% buffer for expression tags and disordered termini. Lower 0.8× gives 20% tolerance for minor N/C-terminal truncations before calling something a subset.  
+**Implementation:** three RCSB search requests using `return_type: "polymer_entity"` with `entity_poly.rcsb_sample_sequence_length` `less`/`less_or_equal`/`greater` filters. The sibling set is derived as the `≤upper` result minus the `<lower` fragment set (avoids a fourth request). `return_type` must be `polymer_entity`, not `entry` — with `entry`, the length filter matches any chain in the entry, not necessarily the UniProt-annotated one, causing false fragment/full-length classifications.  
+**Binder lookup tier for fragments:** fragments are treated like siblings (unconditional binder inclusion) since they cover a subset of the query domain and their cofactors are directly relevant.
 
 ### Binder lookup: three tiers
 **Decision:** known binders are collected from (1) the query structure's own entities, (2) sibling structures unconditionally, (3) full-length structures only if the binder's `cofactor_chem_comp_id` matches a ligand co-crystallised in the query fragment.  

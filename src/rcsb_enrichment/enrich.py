@@ -327,11 +327,13 @@ def enrich_row(
                     _uid_seq_len[uid] = len(e["sequence"])
 
     # --- Related entries ---
+    fragment_ids: list = []
     sibling_ids: list = []
     fulllength_ids: list = []
     search_method = ""
 
     if all_uniprot:
+        seen_fragments: set = set()
         seen_siblings: set = set()
         seen_fulllength: set = set()
         for uid in all_uniprot:
@@ -340,14 +342,18 @@ def enrich_row(
                 cache_key = (uid, uid_seq_len, max_related * 2)
                 if uniprot_search_cache is not None and cache_key in uniprot_search_cache:
                     log.info("[%s] UniProt search cache hit for %s", pdb_id, uid)
-                    _sib, _full = uniprot_search_cache[cache_key]
+                    _frag, _sib, _full = uniprot_search_cache[cache_key]
                 else:
                     log.info("[%s] Searching related entries by UniProt %s", pdb_id, uid)
-                    _sib, _full = get_related_by_uniprot_split(
+                    _frag, _sib, _full = get_related_by_uniprot_split(
                         client, uid, uid_seq_len, max_rows=max_related * 2
                     )
                     if uniprot_search_cache is not None:
-                        uniprot_search_cache[cache_key] = (_sib, _full)
+                        uniprot_search_cache[cache_key] = (_frag, _sib, _full)
+                for r in _frag:
+                    if r not in seen_fragments:
+                        seen_fragments.add(r)
+                        fragment_ids.append(r)
                 for r in _sib:
                     if r not in seen_siblings:
                         seen_siblings.add(r)
@@ -383,6 +389,7 @@ def enrich_row(
 
     # Remove self and other input CSV entries (their relationship is captured separately)
     other_input = input_pdb_ids - {pdb_id}
+    fragment_ids = [r for r in fragment_ids if r.upper() not in other_input and r.upper() != pdb_id]
     sibling_ids = [r for r in sibling_ids if r.upper() not in other_input and r.upper() != pdb_id]
     fulllength_ids = [r for r in fulllength_ids if r.upper() not in other_input and r.upper() != pdb_id]
 
@@ -393,7 +400,16 @@ def enrich_row(
             return related_data_cache[pid]
         return _fetch_related_ligand_data(client, pid)
 
-    # Split related entries into those with and without meaningful ligands
+    fragment_no_ligand: list = []
+    fragment_ligand_entries: list = []
+    for frid in fragment_ids[:max_related]:
+        log.info("[%s] Checking fragment %s for ligands", pdb_id, frid)
+        data = _get_related_data(frid)
+        if data["has_ligands"]:
+            fragment_ligand_entries.append(data)
+        else:
+            fragment_no_ligand.append(frid)
+
     sibling_no_ligand: list = []
     sibling_ligand_entries: list = []
     for sid in sibling_ids[:max_related]:
@@ -414,16 +430,20 @@ def enrich_row(
         else:
             fulllength_no_ligand.append(fid)
 
-    result["all_related_pdb_ids"] = ",".join(sibling_ids[:max_related])
+    result["all_fragment_pdb_ids"] = ",".join(fragment_ids[:max_related])
+    result["all_sibling_pdb_ids"] = ",".join(sibling_ids[:max_related])
     result["all_fulllength_pdb_ids"] = ",".join(fulllength_ids[:max_related])
-    result["related_pdb_ids_no_ligand"] = ",".join(sibling_no_ligand)
-    result["related_pdb_ids_no_ligand_count"] = len(sibling_no_ligand)
+    result["fragment_pdb_ids_no_ligand"] = ",".join(fragment_no_ligand)
+    result["fragment_pdb_ids_no_ligand_count"] = len(fragment_no_ligand)
+    result["sibling_pdb_ids_no_ligand"] = ",".join(sibling_no_ligand)
+    result["sibling_pdb_ids_no_ligand_count"] = len(sibling_no_ligand)
     result["fulllength_pdb_ids_no_ligand"] = ",".join(fulllength_no_ligand)
     result["fulllength_pdb_ids_no_ligand_count"] = len(fulllength_no_ligand)
     result["related_search_method"] = search_method
 
     # Tag columns — None on primary rows; set on related-entry ligand sub-rows
-    result["related_pdb_ids"] = None
+    result["fragment_pdb_ids"] = None
+    result["sibling_pdb_ids"] = None
     result["fulllength_pdb_ids"] = None
 
     # --- Binding sites ---
@@ -448,6 +468,15 @@ def enrich_row(
                 binders_cache[pid] = extract_direct_binders(client, pid)
             return binders_cache[pid]
         return extract_direct_binders(client, pid)
+
+    # Pull binders from fragments — unconditionally (fragments are subsets of the query domain)
+    binder_fragments = [e["pdb_id"] for e in fragment_ligand_entries] + fragment_no_ligand
+    for frid in binder_fragments[:_MAX_RELATED_BINDER_ENTRIES]:
+        log.info("[%s] Fetching binders from fragment %s", pdb_id, frid)
+        for b in _get_binders(frid):
+            b = dict(b)
+            b["binder_source_type"] = "fragment"
+            all_cofactors.append(b)
 
     # Pull binders from siblings — prefer those with ligands first (already fetched), then no-ligand
     binder_siblings = [e["pdb_id"] for e in sibling_ligand_entries] + sibling_no_ligand
@@ -524,6 +553,7 @@ def enrich_row(
     result["_resolved_uniprot_ids"] = all_uniprot
     result["_ligand_metrics"] = ligand_metrics
     result["_peptide_entities"] = peptide_entities
+    result["_fragment_ligand_entries"] = fragment_ligand_entries
     result["_sibling_ligand_entries"] = sibling_ligand_entries
     result["_fulllength_ligand_entries"] = fulllength_ligand_entries
 

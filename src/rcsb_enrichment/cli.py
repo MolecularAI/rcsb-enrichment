@@ -30,7 +30,8 @@ _AUGMENTED_COLS = (
     "parent_pdb_id",
     "entity_names",
     # Tag columns: single PDB ID set only on related-entry ligand sub-rows
-    "related_pdb_ids",
+    "fragment_pdb_ids",
+    "sibling_pdb_ids",
     "fulllength_pdb_ids",
     "species",
     "structure_quality",
@@ -52,11 +53,14 @@ _AUGMENTED_COLS = (
     "ligand_quality",
     "holo_quality",
     # Complete lists of all related entries found by search
-    "all_related_pdb_ids",
+    "all_fragment_pdb_ids",
+    "all_sibling_pdb_ids",
     "all_fulllength_pdb_ids",
     # Lists of related entries that carry NO meaningful ligand
-    "related_pdb_ids_no_ligand",
-    "related_pdb_ids_no_ligand_count",
+    "fragment_pdb_ids_no_ligand",
+    "fragment_pdb_ids_no_ligand_count",
+    "sibling_pdb_ids_no_ligand",
+    "sibling_pdb_ids_no_ligand_count",
     "fulllength_pdb_ids_no_ligand",
     "fulllength_pdb_ids_no_ligand_count",
     "related_search_method",
@@ -72,7 +76,7 @@ _AUGMENTED_COLS_SET = frozenset(_AUGMENTED_COLS)
 _INTERNAL_KEYS = {
     "_seq_len", "_resolved_uniprot_ids",
     "_ligand_metrics", "_peptide_entities",
-    "_sibling_ligand_entries", "_fulllength_ligand_entries",
+    "_fragment_ligand_entries", "_sibling_ligand_entries", "_fulllength_ligand_entries",
 }
 
 
@@ -244,6 +248,7 @@ def main() -> None:
 
     for row in enriched_rows:
         pdb_id_for_ligands = row.pop("_pdb_id", "")
+        fragment_entries = row.pop("_fragment_ligand_entries", []) or []
         sibling_entries = row.pop("_sibling_ligand_entries", []) or []
         fulllength_entries = row.pop("_fulllength_ligand_entries", []) or []
         for key in _INTERNAL_KEYS:
@@ -253,6 +258,16 @@ def main() -> None:
             row.setdefault(col, None)
         final_rows.append(row)
 
+        # Fragment ligands — tagged with the fragment's PDB ID and its crystal quality
+        for entry in fragment_entries:
+            _add_ligand_rows(build_ligand_rows(
+                pdb_id=pdb_id_for_ligands,
+                ligand_metrics=entry["ligand_metrics"],
+                peptide_entities=entry["peptide_entities"],
+                all_output_cols=all_output_cols,
+                tags={"fragment_pdb_ids": entry["pdb_id"], "entity_names": entry.get("entity_names", ""), "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
+            ))
+
         # Sibling ligands — tagged with the sibling's PDB ID and its crystal quality
         for entry in sibling_entries:
             _add_ligand_rows(build_ligand_rows(
@@ -260,7 +275,7 @@ def main() -> None:
                 ligand_metrics=entry["ligand_metrics"],
                 peptide_entities=entry["peptide_entities"],
                 all_output_cols=all_output_cols,
-                tags={"related_pdb_ids": entry["pdb_id"], "entity_names": entry.get("entity_names", ""), "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
+                tags={"sibling_pdb_ids": entry["pdb_id"], "entity_names": entry.get("entity_names", ""), "species": entry.get("species", ""), "structure_quality": entry.get("structure_quality", ""), **entry.get("entry_quality", {})},
             ))
 
         # Full-length ligands — tagged in fulllength_pdb_ids with its crystal quality
