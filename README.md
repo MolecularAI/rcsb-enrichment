@@ -138,13 +138,13 @@ This is useful for heteromeric complexes where only specific subunits are of int
 
 ### Related entries (primary rows)
 
-The three-way classification uses chain length relative to the query sequence:
+The three-way classification compares each related entry's **total deposited polymer residue count** (`rcsb_entry_info.deposited_polymer_monomer_count`) against the query entry's count. This correctly handles heteromeric complexes where individual chains may be the same length but the entry has fewer chains overall (e.g. a two-chain α/β-tubulin structure is a structural subset of a four-chain tubulin/Stathmin/TTL complex even though the tubulin chains themselves are identical in length).
 
-| Class | Chain length | Interpretation |
+| Class | Total residues vs query | Interpretation |
 |---|---|---|
-| Fragment | < query × 0.8 | Sub-domain construct; a subset of the query |
-| Sibling | query × 0.8 – 1.4 | Same construct or minor variant |
-| Full-length | > query × 1.4 | Query is a domain/fragment of this entry |
+| Fragment | < query × 0.8 | Fewer chains than the query; a structural subset |
+| Sibling | query × 0.8 – 1.4 | Same complex composition or minor variant |
+| Full-length | > query × 1.4 | Query is a sub-complex of this entry |
 
 | Column | Description |
 |---|---|

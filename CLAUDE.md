@@ -88,10 +88,10 @@ These were confirmed by live API inspection; do not change without re-verifying.
 ## Design decisions
 
 ### Related entry three-way split: fragment / sibling / full-length
-**Decision:** same-UniProt entries are classified into three groups by deposited chain length relative to the query sequence:
-- **Fragment** (`fragment_pdb_ids`): chain length < query × 0.8 — a subset/domain of the query.
-- **Sibling** (`sibling_pdb_ids`): chain length in [query × 0.8, query × 1.4] — same construct or minor variant.
-- **Full-length** (`fulllength_pdb_ids`): chain length > query × 1.4 — query is a domain/fragment of this entry.
+**Decision:** same-UniProt entries are classified into three groups by total deposited polymer residue count (`rcsb_entry_info.deposited_polymer_monomer_count`) relative to the query entry's count:
+- **Fragment** (`fragment_pdb_ids`): total residues < query × 0.8 — fewer chains than the query; a structural subset.
+- **Sibling** (`sibling_pdb_ids`): total residues in [query × 0.8, query × 1.4] — same complex composition or minor variant.
+- **Full-length** (`fulllength_pdb_ids`): total residues > query × 1.4 — query is a sub-complex of this entry.
 
 **Why:** a query that is itself a fragment (e.g. a domain construct) may have PDB depositions of the isolated domain (sibling), the full protein (full-length), and even shorter sub-domain constructs (fragment). Mixing all three misleads SAR analysis; the three-way split makes the relationship explicit.  
 **Thresholds:** upper 1.4× gives ~40% buffer for expression tags and disordered termini. Lower 0.8× gives 20% tolerance before calling something a subset.  
