@@ -89,7 +89,7 @@ def _is_valid_pdb_id(pdb_id: str) -> bool:
 _CRYSTAL_QUALITY_COLS = (
     "exp_method", "resolution_A", "r_work", "r_free", "clashscore",
     "ramachandran_outliers_pct", "rotamer_outliers_pct", "rsrz_outliers_pct",
-    "bonds_rmsz", "angles_rmsz", "ligands_present",
+    "bonds_rmsz", "angles_rmsz", "ligands_present", "deposited_polymer_monomer_count",
 )
 
 
@@ -346,15 +346,13 @@ def enrich_row(
 
     first_sequence = next((e["sequence"] for e in entities if e.get("sequence")), "")
 
-    # Map each UniProt ID to the sequence length of its own entity so the
-    # sibling/full-length split threshold is derived per-entity rather than
-    # always from the first entity in the filtered list.
-    _uid_seq_len: dict = {}
-    for e in entities:
-        if e.get("sequence"):
-            for uid in e["uniprot_ids"]:
-                if uid not in _uid_seq_len:
-                    _uid_seq_len[uid] = len(e["sequence"])
+    # Use the entry-level total deposited polymer monomer count as the size signal for the
+    # fragment/sibling/full-length split.  A per-chain threshold misses structural subsets
+    # where individual chains are the same length but the entry contains fewer chains overall
+    # (e.g. 1JFF has 2 tubulin chains vs 5S5V's 4, so 1JFF is clearly a subset even though
+    # each tubulin chain is 451 aa in both).  All UniProt IDs from this entry share the same
+    # entry size, so a single threshold value is used for all search calls.
+    _entry_monomer_count = quality.get("deposited_polymer_monomer_count") or len(first_sequence)
 
     # --- Related entries ---
     fragment_ids: list = []
@@ -367,16 +365,15 @@ def enrich_row(
         seen_siblings: set = set()
         seen_fulllength: set = set()
         for uid in all_uniprot:
-            uid_seq_len = _uid_seq_len.get(uid, len(first_sequence))
-            if uid_seq_len:
-                cache_key = (uid, uid_seq_len, _SEARCH_MAX_ROWS)
+            if _entry_monomer_count:
+                cache_key = (uid, _entry_monomer_count, _SEARCH_MAX_ROWS)
                 if uniprot_search_cache is not None and cache_key in uniprot_search_cache:
                     log.info("[%s] UniProt search cache hit for %s", pdb_id, uid)
                     _frag, _sib, _full = uniprot_search_cache[cache_key]
                 else:
                     log.info("[%s] Searching related entries by UniProt %s", pdb_id, uid)
                     _frag, _sib, _full = get_related_by_uniprot_split(
-                        client, uid, uid_seq_len, max_rows=_SEARCH_MAX_ROWS
+                        client, uid, _entry_monomer_count, max_rows=_SEARCH_MAX_ROWS
                     )
                     if uniprot_search_cache is not None:
                         uniprot_search_cache[cache_key] = (_frag, _sib, _full)
@@ -394,7 +391,7 @@ def enrich_row(
                         fulllength_ids.append(r)
                 search_method = "uniprot_split"
             else:
-                cache_key = (uid, 0, _SEARCH_MAX_ROWS)
+                cache_key = (uid, 0, _SEARCH_MAX_ROWS)  # no entry size known
                 if uniprot_search_cache is not None and cache_key in uniprot_search_cache:
                     log.info("[%s] UniProt search cache hit for %s", pdb_id, uid)
                     _results = uniprot_search_cache[cache_key]

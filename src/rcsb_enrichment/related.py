@@ -15,10 +15,14 @@ def _uniprot_length_search(
     length_value: int,
     max_rows: int,
 ) -> list:
-    # return_type="polymer_entity" ensures both the UniProt condition and the length condition
-    # apply to the SAME polymer chain.  With return_type="entry" the length filter matches any
-    # chain in the entry (not necessarily the UniProt-annotated one), causing false positives.
-    # We deduplicate the PDBID_entityN identifiers down to entry-level PDB IDs.
+    # Use rcsb_entry_info.deposited_polymer_monomer_count (total residues across ALL protein
+    # chains in the entry) as the size signal.  A per-chain search on
+    # entity_poly.rcsb_sample_sequence_length would miss structural subsets like 1JFF vs 5S5V:
+    # both have the same tubulin chain length (451 aa), but 1JFF has only 2 protein chains while
+    # 5S5V has 4, so 1JFF's total is ~896 vs 5S5V's ~2319 — the entry-level count captures this.
+    # return_type="entry" is correct here because deposited_polymer_monomer_count is an
+    # entry-level attribute; the UniProt condition selects only entries that contain at least
+    # one chain matching the accession.
     payload = {
         "query": {
             "type": "group",
@@ -38,25 +42,18 @@ def _uniprot_length_search(
                     "type": "terminal",
                     "service": "text",
                     "parameters": {
-                        "attribute": "entity_poly.rcsb_sample_sequence_length",
+                        "attribute": "rcsb_entry_info.deposited_polymer_monomer_count",
                         "operator": length_operator,
                         "value": length_value,
                     },
                 },
             ],
         },
-        "return_type": "polymer_entity",
+        "return_type": "entry",
         "request_options": {"paginate": {"start": 0, "rows": max_rows}},
     }
     data = client.post(RCSB_SEARCH, payload)
-    seen: set = set()
-    entries: list = []
-    for r in (data or {}).get("result_set") or []:
-        pdb_id = r["identifier"].split("_")[0]
-        if pdb_id not in seen:
-            seen.add(pdb_id)
-            entries.append(pdb_id)
-    return entries
+    return [r["identifier"] for r in (data or {}).get("result_set") or []]
 
 
 def get_related_by_uniprot(client: RCSBClient, uniprot_id: str, max_rows: int = 200) -> list:

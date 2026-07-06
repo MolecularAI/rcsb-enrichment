@@ -30,6 +30,7 @@ def get_entry_quality(client: RCSBClient, pdb_id: str) -> dict:
     entry_info = data.get("rcsb_entry_info") or {}
     dres = entry_info.get("diffrn_resolution_high") or {}
     out["resolution_A"] = dres.get("value")
+    out["deposited_polymer_monomer_count"] = entry_info.get("deposited_polymer_monomer_count")
 
     refine = data.get("refine") or []
     if refine:
