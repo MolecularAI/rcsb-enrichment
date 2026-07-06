@@ -213,6 +213,7 @@ def enrich_row(
     entity_name_filters: list | None = None,
     related_data_cache: dict | None = None,
     binders_cache: dict | None = None,
+    uniprot_search_cache: dict | None = None,
 ) -> dict:
     pdb_id = _normalise_pdb_id(str(row[pdb_col]).strip()).upper()
     result = dict(row)
@@ -315,6 +316,16 @@ def enrich_row(
 
     first_sequence = next((e["sequence"] for e in entities if e.get("sequence")), "")
 
+    # Map each UniProt ID to the sequence length of its own entity so the
+    # sibling/full-length split threshold is derived per-entity rather than
+    # always from the first entity in the filtered list.
+    _uid_seq_len: dict = {}
+    for e in entities:
+        if e.get("sequence"):
+            for uid in e["uniprot_ids"]:
+                if uid not in _uid_seq_len:
+                    _uid_seq_len[uid] = len(e["sequence"])
+
     # --- Related entries ---
     sibling_ids: list = []
     fulllength_ids: list = []
@@ -324,11 +335,19 @@ def enrich_row(
         seen_siblings: set = set()
         seen_fulllength: set = set()
         for uid in all_uniprot:
-            log.info("[%s] Searching related entries by UniProt %s", pdb_id, uid)
-            if first_sequence:
-                _sib, _full = get_related_by_uniprot_split(
-                    client, uid, len(first_sequence), max_rows=max_related * 2
-                )
+            uid_seq_len = _uid_seq_len.get(uid, len(first_sequence))
+            if uid_seq_len:
+                cache_key = (uid, uid_seq_len, max_related * 2)
+                if uniprot_search_cache is not None and cache_key in uniprot_search_cache:
+                    log.info("[%s] UniProt search cache hit for %s", pdb_id, uid)
+                    _sib, _full = uniprot_search_cache[cache_key]
+                else:
+                    log.info("[%s] Searching related entries by UniProt %s", pdb_id, uid)
+                    _sib, _full = get_related_by_uniprot_split(
+                        client, uid, uid_seq_len, max_rows=max_related * 2
+                    )
+                    if uniprot_search_cache is not None:
+                        uniprot_search_cache[cache_key] = (_sib, _full)
                 for r in _sib:
                     if r not in seen_siblings:
                         seen_siblings.add(r)
@@ -339,7 +358,16 @@ def enrich_row(
                         fulllength_ids.append(r)
                 search_method = "uniprot_split"
             else:
-                for r in get_related_by_uniprot(client, uid, max_rows=max_related * 2):
+                cache_key = (uid, 0, max_related * 2)
+                if uniprot_search_cache is not None and cache_key in uniprot_search_cache:
+                    log.info("[%s] UniProt search cache hit for %s", pdb_id, uid)
+                    _results = uniprot_search_cache[cache_key]
+                else:
+                    log.info("[%s] Searching related entries by UniProt %s", pdb_id, uid)
+                    _results = get_related_by_uniprot(client, uid, max_rows=max_related * 2)
+                    if uniprot_search_cache is not None:
+                        uniprot_search_cache[cache_key] = _results
+                for r in _results:
                     if r not in seen_siblings:
                         seen_siblings.add(r)
                         sibling_ids.append(r)

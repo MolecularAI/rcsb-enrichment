@@ -172,6 +172,7 @@ def main() -> None:
     # when multiple input PDB IDs resolve to overlapping sets of related structures.
     related_data_cache: dict = {}
     binders_cache: dict = {}
+    uniprot_search_cache: dict = {}
     enriched_rows = []
 
     for i, row in enumerate(df.to_dict(orient="records"), 1):
@@ -198,6 +199,7 @@ def main() -> None:
                 entity_name_filters=entity_name_filters,
                 related_data_cache=related_data_cache,
                 binders_cache=binders_cache,
+                uniprot_search_cache=uniprot_search_cache,
             )
         except Exception as exc:
             log.error("[%s] Failed: %s", pdb_id, exc, exc_info=True)

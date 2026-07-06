@@ -209,5 +209,11 @@ Iridium grades X-ray structures HT / MT / LT (high / medium / low throughput for
 **Mutation safety:** `extract_direct_binders` results are cached as returned; callers must `dict(b)` before adding `binder_source_type` to avoid mutating the cached original. This is enforced at the call sites in `enrich_row`.  
 **New output columns:** `all_related_pdb_ids` and `all_fulllength_pdb_ids` on primary rows list the complete search-result sets (all found siblings/full-lengths, after self and other-input exclusion), independently of whether those entries have meaningful ligands.
 
+### UniProt search result cache (`uniprot_search_cache`)
+
+**Decision:** `cli.main()` creates a `uniprot_search_cache` dict shared across all `enrich_row` calls. It is keyed by `(uniprot_id, seq_len, max_rows)` and stores the `(siblings, full_length)` tuple returned by `get_related_by_uniprot_split` (or the flat list from `get_related_by_uniprot` when seq_len is 0).  
+**Why:** when multiple input PDB IDs resolve to the same set of UniProt IDs (e.g. two tubulin structures both filtered to P81947 + Q6B856), each search fires 2 × 2 = 4 API calls. The cache collapses these to 4 calls total for the entire run regardless of how many input rows share those UniProt IDs.  
+**Cache key includes `max_rows`** so a future call with a different `--max-related` value gets a fresh search rather than a truncated cached result.
+
 ---
 
