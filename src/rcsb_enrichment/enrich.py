@@ -430,10 +430,13 @@ def enrich_row(
             return related_data_cache[pid]
         return _fetch_related_ligand_data(client, pid)
 
+    # When include_all_related is set every found entry is fetched; otherwise cap at max_related.
+    _fetch_limit = None if include_all_related else max_related
+
     fragment_no_ligand: list = []
     fragment_no_ligand_entries: list = []
     fragment_ligand_entries: list = []
-    for frid in fragment_ids[:max_related]:
+    for frid in fragment_ids[:_fetch_limit]:
         log.info("[%s] Checking fragment %s for ligands", pdb_id, frid)
         data = _get_related_data(frid)
         if data["has_ligands"]:
@@ -446,7 +449,7 @@ def enrich_row(
     sibling_no_ligand: list = []
     sibling_no_ligand_entries: list = []
     sibling_ligand_entries: list = []
-    for sid in sibling_ids[:max_related]:
+    for sid in sibling_ids[:_fetch_limit]:
         log.info("[%s] Checking sibling %s for ligands", pdb_id, sid)
         data = _get_related_data(sid)
         if data["has_ligands"]:
@@ -459,7 +462,7 @@ def enrich_row(
     fulllength_no_ligand: list = []
     fulllength_no_ligand_entries: list = []
     fulllength_ligand_entries: list = []
-    for fid in fulllength_ids[:max_related]:
+    for fid in fulllength_ids[:_fetch_limit]:
         log.info("[%s] Checking full-length %s for ligands", pdb_id, fid)
         data = _get_related_data(fid)
         if data["has_ligands"]:

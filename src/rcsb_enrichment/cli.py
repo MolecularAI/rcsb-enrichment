@@ -140,10 +140,11 @@ def main() -> None:
         action="store_true",
         default=False,
         help=(
-            "Include all fetched related entries as rows even when they have no "
-            "interesting ligands. Such rows carry structure quality metrics only "
-            "(row_type='related'). Without this flag only entries with qualifying "
-            "ligands generate rows."
+            "Generate a row for every related entry found, regardless of whether it "
+            "has interesting ligands. Overrides --max-related: all found entries are "
+            "fetched and emitted (row_type='related' for those without ligands, "
+            "'ligand' for those with). Without this flag only entries with qualifying "
+            "ligands are fetched, capped at --max-related."
         ),
     )
     parser.add_argument(
