@@ -154,6 +154,8 @@ These were confirmed by live API inspection; do not change without re-verifying.
 
 ### `iridium_score`: design and known gaps vs. OpenEye Iridium
 
+**Source:** Warren et al., "Essential considerations for using protein–ligand structures in drug discovery", *Drug Discovery Today* 17(23–24), 1270–1281, December 2012.
+
 **What we implemented (`quality.iridium_score`):**  
 A weighted-mean composite grade ("good" / "fair" / "bad") over six global structure criteria and one binding-site criterion:
 
@@ -169,25 +171,41 @@ A weighted-mean composite grade ("good" / "fair" / "bad") over six global struct
 
 Weighted mean < 0.67 → "good", < 1.33 → "fair", ≥ 1.33 → "bad". Missing metrics are excluded (not penalised); the score degrades gracefully for cryo-EM and NMR entries.
 
-**OpenEye Iridium (Warren et al., Drug Discovery Today, 2012 — recalled from training data, verify against paper before acting on):**  
-Iridium grades X-ray structures HT / MT / LT (high / medium / low throughput for SBDD) using a decision-tree rather than a weighted mean. Key criteria reportedly include:
+**What the actual Iridium paper does (verified from paper):**  
+Iridium classifies X-ray structures into three tiers — **HT** (Highly Trustworthy), **MT** (Mildly Trustworthy), **NT** (Not Trustworthy) — using a sequential decision tree, not a weighted mean. The tree (Chart 1 in the paper) filters in this order:
 
-- Resolution
-- R-free
-- Clashscore (MolProbity)
-- Ramachandran outliers
-- Ligand RSCC (real-space correlation coefficient)
-- **Ligand average B-factor** (or ratio to protein mean B-factor) — the single biggest gap in our implementation; high relative B-factor signals a disordered pose even when RSCC looks acceptable
-- **Ligand occupancy** — partial occupancy (< 1.0) is penalised; we do not track it
+1. **Electron density available** (public EDS data) — structures without it cannot enter the pipeline at all. This alone cut 728 → 233 structures (68% rejected).
+2. **R-factor < 0.40** — structures at ≥ 0.40 go to NT; at this value a model is statistically indistinguishable from random.
+3. **Density for ligands** — no density → removed; partial density (RSR 0.10–0.30, RSCC 0.50–0.90) → MT; complete density (RSR < 0.10, RSCC > 0.90) required for HT.
+4. **Non-covalent ligands only** — covalent ligands → MT (pose/affinity prediction requires knowledge of the covalent bond, which most docking algorithms lack).
+5. **No alternate conformations for active-site side chains** (within 5 Å of any ligand atom) → MT if present.
+6. **No alternate conformations for ligand atoms** → MT if present.
+7. **No crystal packing contacts** (no atom from a neighbouring protein in the lattice within 6 Å of any ligand atom) — electrostatic surface residues can stabilise ligand conformations not present in solution → MT if violated.
+8. **Complete density in active site** — all active-site residue and co-factor atoms have density.
+9. **Occupancy = 1.0 in active site** — ligand and active-site atoms must be fully occupied → MT if < 1.0.
 
-**Structural differences:**  
-- *Decision tree vs. weighted mean:* Iridium downgrades a structure if any single criterion fails its threshold, with no compensation from other good metrics. Our averaging is more lenient — excellent density fit can offset a mediocre clashscore.  
-- *Scope:* Iridium is X-ray-only by design; our score handles cryo-EM and NMR gracefully by skipping X-ray-only sub-criteria.  
-- *Extra criteria we added (not in Iridium):* contact-residue outlier fraction and intermolecular clash count (both captured in the `binding_quality` traffic-light that feeds into `iridium_score` with weight 2).
+Only structures passing all nine steps reach the HT set (121 of 728, 17%).
 
-**To close the gap, the two most impactful additions would be:**  
-1. Ligand B-factor ratio — available via `rcsb_nonpolymer_instance_validation_score[0].average_occupancy` (occupancy already present in RCSB API); the B-factor itself may need the `pdbx_nonpoly_scheme` or wwPDB validation XML.  
-2. Ligand occupancy — `rcsb_nonpolymer_instance_validation_score[0].average_occupancy`; threshold at < 1.0 (fair) / < 0.5 (bad) is a reasonable starting point.
+**Key corrections to the prior CLAUDE.md entry (which was recalled from training data):**
+
+- **Tier names:** HT / MT / **NT** (Not Trustworthy), not "HT / MT / LT".
+- **Clashscore and Ramachandran outlier % are NOT Iridium criteria.** They are wwPDB/MolProbity validation metrics. The original Iridium paper does not use them. We added them to our score because they are available from RCSB and are reasonable proxies, but they are our addition, not Iridium's.
+- **B-factor is NOT a filter criterion in the Iridium decision tree.** The paper discusses the occupancy-weighted B-factor (owB-factor) as a useful local quality indicator alongside RSR and RSCC, but it does not appear as a step in Chart 1. It was incorrect to call it "the single biggest gap".
+- **RSCC thresholds in the paper:** complete density = RSCC > 0.90 / RSR < 0.10; partial density = RSCC 0.50–0.90 / RSR 0.10–0.30; no density = RSCC < 0.50 / RSR > 0.30. Our traffic-light uses 0.80/0.60 for RSCC, which is more lenient than the paper's 0.90 threshold for "complete density".
+- **R-factor (not R-free) < 0.40** is the NT hard cutoff. The paper also recommends R-free < 0.45 and R − R-free difference ≤ 0.05 (Table 1). We currently use R-free ≤ 0.25/0.30 as good/fair thresholds — a stricter criterion on R-free but we do not check R − R-free divergence.
+
+**Gaps in our implementation vs. the actual Iridium paper (in priority order):**
+
+1. **Ligand occupancy < 1.0** — a hard HT criterion; structures with any active-site atom at < 1.0 occupancy go to MT. Available from RCSB: `rcsb_nonpolymer_instance_validation_score[0].average_occupancy`. Threshold: < 1.0 → downgrade.
+2. **Crystal packing contacts within 6 Å of ligand** — not tracked. Would require fetching the full unit cell or symmetry-mate coordinates; not directly available via the RCSB REST API.
+3. **Alternate conformations for ligand and active-site side chains** — not tracked. Would require inspecting `pdbx_struct_conf` or the full PDB/mmCIF file.
+4. **R − R-free divergence > 0.05** (overfitting indicator) — R-work is available from RCSB; we could add the difference check.
+5. **RSCC "good" threshold should arguably be 0.90, not 0.80** — the paper equates 0.90 with "complete density". Our more lenient 0.80 threshold is closer to RCSB's own "acceptable" flag.
+
+**What our score does that Iridium does not:**  
+- Accepts cryo-EM and NMR (Iridium is X-ray only; we skip X-ray-only sub-criteria gracefully).
+- Penalises intermolecular clashes and contact-residue outlier fraction via the `binding_quality` traffic-light (weight 2 in our composite).
+- Uses Clashscore and Ramachandran / rotamer outlier % from wwPDB validation as protein geometry proxies.
 
 ### Multi-UniProt related-entry search
 
