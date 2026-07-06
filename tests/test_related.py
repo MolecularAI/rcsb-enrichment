@@ -3,7 +3,8 @@
 import pytest
 from unittest.mock import MagicMock, call
 from rcsb_enrichment.related import (
-    _SEQ_LEN_RATIO,
+    _SEQ_LEN_RATIO_LOWER,
+    _SEQ_LEN_RATIO_UPPER,
     get_related_by_sequence,
     get_related_by_uniprot,
     get_related_by_uniprot_split,
@@ -42,41 +43,79 @@ class TestGetRelatedByUniprot:
 
 
 class TestGetRelatedByUniprotSplit:
-    def test_splits_into_siblings_and_full_length(self):
+    def test_splits_into_fragments_siblings_full_length(self):
         client = MagicMock()
         client.post.side_effect = [
-            _search_result("SIB1", "SIB2"),   # siblings (less_or_equal)
-            _search_result("FULL1"),            # full-length (greater)
+            _search_result("FRAG1"),             # fragments (less)
+            _search_result("SIB1", "SIB2"),      # lte_upper set (less_or_equal)
+            _search_result("FULL1"),             # full-length (greater)
         ]
-        siblings, full = get_related_by_uniprot_split(client, "P12345", 100)
+        fragments, siblings, full = get_related_by_uniprot_split(client, "P12345", 100)
+        assert fragments == ["FRAG1"]
         assert siblings == ["SIB1", "SIB2"]
         assert full == ["FULL1"]
 
-    def test_threshold_is_1_4x(self):
+    def test_fragments_excluded_from_siblings(self):
+        client = MagicMock()
+        # FRAG1 appears in both the less search and the less_or_equal search;
+        # it must be subtracted so siblings only contains the non-fragment entries.
+        client.post.side_effect = [
+            _search_result("FRAG1"),             # fragments
+            _search_result("FRAG1", "SIB1"),     # lte_upper — includes the fragment
+            _search_result(),                    # full-length
+        ]
+        fragments, siblings, full = get_related_by_uniprot_split(client, "P12345", 100)
+        assert "FRAG1" not in siblings
+        assert "SIB1" in siblings
+
+    def test_upper_threshold_is_1_4x(self):
         client = MagicMock()
         client.post.return_value = {"result_set": []}
         get_related_by_uniprot_split(client, "P12345", 200)
         calls = client.post.call_args_list
-        # First call: less_or_equal, threshold = int(200 * 1.4) = 280
-        first_payload = calls[0][0][1]
-        length_node = first_payload["query"]["nodes"][1]
-        assert length_node["parameters"]["operator"] == "less_or_equal"
-        assert length_node["parameters"]["value"] == int(200 * _SEQ_LEN_RATIO)
-        # Second call: greater, same threshold
-        second_payload = calls[1][0][1]
-        length_node2 = second_payload["query"]["nodes"][1]
-        assert length_node2["parameters"]["operator"] == "greater"
+        # call[0]: less (lower threshold = int(200 * 0.8) = 160)
+        # call[1]: less_or_equal (upper threshold = int(200 * 1.4) = 280)
+        # call[2]: greater (upper threshold = int(200 * 1.4) = 280)
+        upper = int(200 * _SEQ_LEN_RATIO_UPPER)
+        lower = int(200 * _SEQ_LEN_RATIO_LOWER)
 
-    def test_two_api_calls_made(self):
+        first_payload = calls[0][0][1]
+        assert first_payload["query"]["nodes"][1]["parameters"]["operator"] == "less"
+        assert first_payload["query"]["nodes"][1]["parameters"]["value"] == lower
+
+        second_payload = calls[1][0][1]
+        assert second_payload["query"]["nodes"][1]["parameters"]["operator"] == "less_or_equal"
+        assert second_payload["query"]["nodes"][1]["parameters"]["value"] == upper
+
+        third_payload = calls[2][0][1]
+        assert third_payload["query"]["nodes"][1]["parameters"]["operator"] == "greater"
+        assert third_payload["query"]["nodes"][1]["parameters"]["value"] == upper
+
+    def test_three_api_calls_made(self):
         client = MagicMock()
         client.post.return_value = {"result_set": []}
         get_related_by_uniprot_split(client, "P12345", 100)
-        assert client.post.call_count == 2
+        assert client.post.call_count == 3
 
-    def test_both_empty(self):
+    def test_all_empty(self):
         client = MagicMock()
         client.post.return_value = {"result_set": []}
-        siblings, full = get_related_by_uniprot_split(client, "P12345", 100)
+        fragments, siblings, full = get_related_by_uniprot_split(client, "P12345", 100)
+        assert fragments == []
+        assert siblings == []
+        assert full == []
+
+    def test_returns_three_tuple(self):
+        client = MagicMock()
+        client.post.return_value = {"result_set": []}
+        result = get_related_by_uniprot_split(client, "P12345", 100)
+        assert len(result) == 3
+
+    def test_none_response_handled(self):
+        client = MagicMock()
+        client.post.return_value = None
+        fragments, siblings, full = get_related_by_uniprot_split(client, "P12345", 100)
+        assert fragments == []
         assert siblings == []
         assert full == []
 

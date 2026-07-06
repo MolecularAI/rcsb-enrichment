@@ -241,7 +241,8 @@ class TestEnrichRow:
         # get() side_effect: entry, entity, pdbe — then None for each _fetch_related_ligand_data call
         client.get.side_effect = list(client.get.side_effect) + [None, None]
         client.post.side_effect = [
-            {"result_set": [{"identifier": "1ABC"}, {"identifier": "2DEF"}]},  # siblings
+            {"result_set": []},                                                   # fragments
+            {"result_set": [{"identifier": "1ABC"}, {"identifier": "2DEF"}]},   # lte-upper siblings
             {"result_set": []},                                                   # full-length
         ]
         with patch("rcsb_enrichment.enrich.extract_direct_binders", return_value=[]):
@@ -254,15 +255,16 @@ class TestEnrichRow:
                 max_related=25,
                 input_pdb_ids=frozenset(["1ABC"]),
             )
-        assert "1ABC" not in result.get("related_pdb_ids_no_ligand", "")
+        assert "1ABC" not in result.get("all_sibling_pdb_ids", "")
 
     def test_other_input_pdb_excluded_from_related(self):
         client = self._mock_full_run()
         # get() side_effect: entry, entity, pdbe — plus one for _fetch_related_ligand_data(3GHI)
         client.get.side_effect = list(client.get.side_effect) + [None]
         client.post.side_effect = [
-            {"result_set": [{"identifier": "2DEF"}, {"identifier": "3GHI"}]},  # siblings
-            {"result_set": []},
+            {"result_set": []},                                                    # fragments
+            {"result_set": [{"identifier": "2DEF"}, {"identifier": "3GHI"}]},    # lte-upper
+            {"result_set": []},                                                    # full-length
         ]
         with patch("rcsb_enrichment.enrich.extract_direct_binders", return_value=[]):
             result = enrich_row(
@@ -274,8 +276,8 @@ class TestEnrichRow:
                 max_related=25,
                 input_pdb_ids=frozenset(["1ABC", "2DEF"]),
             )
-        assert "2DEF" not in result.get("related_pdb_ids_no_ligand", "")
-        assert "3GHI" in result.get("related_pdb_ids_no_ligand", "")
+        assert "2DEF" not in result.get("all_sibling_pdb_ids", "")
+        assert "3GHI" in result.get("all_sibling_pdb_ids", "")
 
     def test_404_entry_gives_none_quality_fields(self):
         # When get() returns None (404) quality = {} → all quality fields are None
@@ -387,8 +389,10 @@ class TestEnrichRow:
             seq_identity=0.9,
             max_related=25,
         )
-        assert result["related_pdb_ids"] is None
+        # Tag cols are None on primary rows; set only on sub-rows of related entries
+        assert result["sibling_pdb_ids"] is None
         assert result["fulllength_pdb_ids"] is None
+        assert result["fragment_pdb_ids"] is None
 
     def test_internal_related_ligand_entries_attached(self):
         client = self._mock_full_run()
@@ -400,6 +404,7 @@ class TestEnrichRow:
             seq_identity=0.9,
             max_related=25,
         )
+        assert "_fragment_ligand_entries" in result
         assert "_sibling_ligand_entries" in result
         assert "_fulllength_ligand_entries" in result
 
@@ -523,15 +528,15 @@ class TestBuildLigandRowsTags:
     def test_tags_applied_to_small_molecule_row(self):
         rows = build_ligand_rows(
             "1ABC", [self._good_metric()], [], self._all_cols(),
-            tags={"related_pdb_ids": "4SIB"}
+            tags={"sibling_pdb_ids": "4SIB"}
         )
-        assert rows[0]["related_pdb_ids"] == "4SIB"
+        assert rows[0]["sibling_pdb_ids"] == "4SIB"
         assert rows[0]["fulllength_pdb_ids"] is None
 
     def test_crystal_quality_tags_propagated(self):
         rows = build_ligand_rows(
             "1ABC", [self._good_metric()], [], self._all_cols(),
-            tags={"related_pdb_ids": "4SIB", "exp_method": "X-RAY DIFFRACTION",
+            tags={"sibling_pdb_ids": "4SIB", "exp_method": "X-RAY DIFFRACTION",
                   "resolution_A": 1.8, "r_work": 0.19, "r_free": 0.23,
                   "clashscore": 2.1, "rsrz_outliers_pct": 3.0}
         )
@@ -545,19 +550,19 @@ class TestBuildLigandRowsTags:
             tags={"fulllength_pdb_ids": "8FUL"}
         )
         assert rows[0]["fulllength_pdb_ids"] == "8FUL"
-        assert rows[0]["related_pdb_ids"] is None
+        assert rows[0]["sibling_pdb_ids"] is None
 
     def test_no_tags_leaves_columns_none(self):
         rows = build_ligand_rows(
             "1ABC", [self._good_metric()], [], self._all_cols()
         )
-        assert rows[0]["related_pdb_ids"] is None
+        assert rows[0]["sibling_pdb_ids"] is None
         assert rows[0]["fulllength_pdb_ids"] is None
 
     def test_parent_pdb_id_is_input_pdb_not_related(self):
         rows = build_ligand_rows(
             "1ABC", [self._good_metric()], [], self._all_cols(),
-            tags={"related_pdb_ids": "4SIB"}
+            tags={"sibling_pdb_ids": "4SIB"}
         )
         assert rows[0]["parent_pdb_id"] == "1ABC"
 
@@ -915,9 +920,11 @@ class TestRelatedDataCache:
         pdbe = {"1abc": []}
         client.get.side_effect = [entry, poly, pdbe, entry, poly, pdbe]
         client.post.side_effect = [
-            {"result_set": [{"identifier": "2SIB"}]},  # row 1 siblings
+            {"result_set": []},                         # row 1 fragments
+            {"result_set": [{"identifier": "2SIB"}]},  # row 1 lte-upper
             {"result_set": []},                         # row 1 full-length
-            {"result_set": [{"identifier": "2SIB"}]},  # row 2 siblings
+            {"result_set": []},                         # row 2 fragments
+            {"result_set": [{"identifier": "2SIB"}]},  # row 2 lte-upper
             {"result_set": []},                         # row 2 full-length
         ]
         return client
@@ -954,9 +961,11 @@ class TestRelatedDataCache:
         pdbe = {"1abc": []}
         client.get.side_effect = [entry, poly, pdbe, entry, poly, pdbe]
         client.post.side_effect = [
-            {"result_set": [{"identifier": "2SIB"}]},  # row 1 siblings
+            {"result_set": []},                         # row 1 fragments
+            {"result_set": [{"identifier": "2SIB"}]},  # row 1 lte-upper
             {"result_set": []},                         # row 1 full-length
-            {"result_set": [{"identifier": "2SIB"}]},  # row 2 siblings
+            {"result_set": []},                         # row 2 fragments
+            {"result_set": [{"identifier": "2SIB"}]},  # row 2 lte-upper
             {"result_set": []},                         # row 2 full-length
         ]
 
@@ -987,6 +996,7 @@ class TestRelatedDataCache:
                 "pdb_id": "2SIB", "entry_quality": {}, "ligand_metrics": [],
                 "peptide_entities": [], "has_ligands": False,
                 "species": "", "entity_names": "", "structure_quality": "",
+                "structure_quality_ligand_used": False,
             }
 
             client = MagicMock()
@@ -1055,7 +1065,8 @@ class TestAllRelatedPdbIdsCols:
             self._entry_data(), self._poly_entity(), {"1abc": []},  # primary row
         ]
         client.post.side_effect = [
-            {"result_set": [{"identifier": "2SIB"}, {"identifier": "3SIB"}]},  # siblings
+            {"result_set": []},                                                  # fragments
+            {"result_set": [{"identifier": "2SIB"}, {"identifier": "3SIB"}]},  # lte-upper
             {"result_set": []},                                                  # full-length
         ]
 
@@ -1070,8 +1081,8 @@ class TestAllRelatedPdbIdsCols:
                 max_related=25,
             )
 
-        assert "2SIB" in result["all_related_pdb_ids"]
-        assert "3SIB" in result["all_related_pdb_ids"]
+        assert "2SIB" in result["all_sibling_pdb_ids"]
+        assert "3SIB" in result["all_sibling_pdb_ids"]
 
     def test_all_related_excludes_input_pdb_self(self):
         client = MagicMock()
@@ -1080,8 +1091,9 @@ class TestAllRelatedPdbIdsCols:
         ]
         # Search returns the query itself plus a genuine sibling
         client.post.side_effect = [
-            {"result_set": [{"identifier": "1ABC"}, {"identifier": "2SIB"}]},
-            {"result_set": []},
+            {"result_set": []},                                                  # fragments
+            {"result_set": [{"identifier": "1ABC"}, {"identifier": "2SIB"}]},  # lte-upper
+            {"result_set": []},                                                  # full-length
         ]
 
         with patch("rcsb_enrichment.enrich._fetch_related_ligand_data") as mock_fetch, \
@@ -1101,5 +1113,285 @@ class TestAllRelatedPdbIdsCols:
                 input_pdb_ids=frozenset(["1ABC"]),
             )
 
-        assert "1ABC" not in result["all_related_pdb_ids"]
-        assert "2SIB" in result["all_related_pdb_ids"]
+        assert "1ABC" not in result["all_sibling_pdb_ids"]
+        assert "2SIB" in result["all_sibling_pdb_ids"]
+
+
+# ---------------------------------------------------------------------------
+# build_related_row
+# ---------------------------------------------------------------------------
+
+class TestBuildRelatedRow:
+    def _all_cols(self):
+        from rcsb_enrichment.cli import _AUGMENTED_COLS
+        return ("pdb_id", "uniprot") + _AUGMENTED_COLS
+
+    def _entry_data(self):
+        return {
+            "pdb_id": "2REL",
+            "entry_quality": {
+                "exp_method": "X-RAY DIFFRACTION",
+                "resolution_A": 2.1,
+                "r_work": 0.18,
+                "r_free": 0.22,
+                "clashscore": 4.0,
+            },
+            "ligand_metrics": [],
+            "peptide_entities": [],
+            "has_ligands": False,
+            "species": "Homo sapiens",
+            "entity_names": "Kinase domain",
+            "structure_quality": "good",
+            "structure_quality_ligand_used": False,
+        }
+
+    def test_row_type_is_related(self):
+        from rcsb_enrichment.enrich import build_related_row
+        row = build_related_row("1ABC", self._entry_data(), self._all_cols())
+        assert row["row_type"] == "related"
+
+    def test_parent_pdb_id_is_set(self):
+        from rcsb_enrichment.enrich import build_related_row
+        row = build_related_row("1ABC", self._entry_data(), self._all_cols())
+        assert row["parent_pdb_id"] == "1ABC"
+
+    def test_crystal_quality_unpacked(self):
+        from rcsb_enrichment.enrich import build_related_row
+        row = build_related_row("1ABC", self._entry_data(), self._all_cols())
+        assert row["exp_method"] == "X-RAY DIFFRACTION"
+        assert row["resolution_A"] == pytest.approx(2.1)
+        assert row["clashscore"] == pytest.approx(4.0)
+
+    def test_structure_quality_propagated(self):
+        from rcsb_enrichment.enrich import build_related_row
+        row = build_related_row("1ABC", self._entry_data(), self._all_cols())
+        assert row["structure_quality"] == "good"
+        assert row["structure_quality_ligand_used"] is False
+
+    def test_species_and_entity_names_set(self):
+        from rcsb_enrichment.enrich import build_related_row
+        row = build_related_row("1ABC", self._entry_data(), self._all_cols())
+        assert row["species"] == "Homo sapiens"
+        assert row["entity_names"] == "Kinase domain"
+
+    def test_tags_applied(self):
+        from rcsb_enrichment.enrich import build_related_row
+        row = build_related_row(
+            "1ABC", self._entry_data(), self._all_cols(),
+            tags={"sibling_pdb_ids": "2REL"}
+        )
+        assert row["sibling_pdb_ids"] == "2REL"
+
+    def test_ligand_cols_are_none(self):
+        from rcsb_enrichment.enrich import build_related_row, LIGAND_DETAIL_COLS
+        row = build_related_row("1ABC", self._entry_data(), self._all_cols())
+        for col in LIGAND_DETAIL_COLS:
+            assert row.get(col) is None, f"Expected {col} to be None on related row"
+
+
+# ---------------------------------------------------------------------------
+# uniprot_search_cache deduplication
+# ---------------------------------------------------------------------------
+
+class TestUniprotSearchCache:
+    def _entry_data(self):
+        return {
+            "exptl": [{"method": "X-RAY DIFFRACTION"}],
+            "rcsb_entry_info": {"diffrn_resolution_high": {"value": 2.0},
+                                "nonpolymer_bound_components": [],
+                                "deposited_polymer_monomer_count": 100},
+            "refine": [],
+            "pdbx_vrpt_summary_geometry": [],
+            "pdbx_vrpt_summary_diffraction": [],
+            "rcsb_entry_container_identifiers": {
+                "polymer_entity_ids": ["1"],
+                "non_polymer_entity_ids": [],
+            },
+        }
+
+    def _poly_entity(self, uid="P12345"):
+        return {
+            "entity_poly": {"rcsb_entity_polymer_type": "Protein",
+                            "pdbx_seq_one_letter_code_can": "A" * 100},
+            "rcsb_polymer_entity_container_identifiers": {"uniprot_ids": [uid], "bird_id": None},
+            "rcsb_polymer_entity": {"pdbx_description": "Test protein"},
+            "rcsb_entity_source_organism": [],
+            "rcsb_target_cofactors": [],
+            "rcsb_polymer_entity_feature": [],
+        }
+
+    def test_cache_prevents_duplicate_search_calls(self):
+        """Two enrich_row calls for the same UniProt should fire the 3 search POSTs only once."""
+        shared_cache = {}
+        call_count = [0]
+
+        def _fake_get_related(client, uid, seq_len, max_rows):
+            call_count[0] += 1
+            return [], [], []
+
+        client = MagicMock()
+        pdbe = {"1abc": []}
+        entry = self._entry_data()
+        poly = self._poly_entity()
+        client.get.side_effect = [entry, poly, pdbe, entry, poly, pdbe]
+        client.post.return_value = {"result_set": []}
+
+        with patch("rcsb_enrichment.enrich.get_related_by_uniprot_split",
+                   side_effect=_fake_get_related):
+            for _ in range(2):
+                enrich_row(
+                    row={"PDBID": "1ABC", "Uniprot": "P12345"},
+                    client=client,
+                    pdb_col="PDBID",
+                    uniprot_col="Uniprot",
+                    seq_identity=0.9,
+                    max_related=5,
+                    uniprot_search_cache=shared_cache,
+                )
+
+        assert call_count[0] == 1, "UniProt search must be called only once when cache is shared"
+
+    def test_no_cache_calls_search_each_time(self):
+        """Without a shared cache the search fires once per enrich_row call."""
+        call_count = [0]
+
+        def _fake_get_related(client, uid, seq_len, max_rows):
+            call_count[0] += 1
+            return [], [], []
+
+        client = MagicMock()
+        pdbe = {"1abc": []}
+        entry = self._entry_data()
+        poly = self._poly_entity()
+        client.get.side_effect = [entry, poly, pdbe, entry, poly, pdbe]
+        client.post.return_value = {"result_set": []}
+
+        with patch("rcsb_enrichment.enrich.get_related_by_uniprot_split",
+                   side_effect=_fake_get_related):
+            for _ in range(2):
+                enrich_row(
+                    row={"PDBID": "1ABC", "Uniprot": "P12345"},
+                    client=client,
+                    pdb_col="PDBID",
+                    uniprot_col="Uniprot",
+                    seq_identity=0.9,
+                    max_related=5,
+                )
+
+        assert call_count[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# Fragment-path branches in enrich_row
+# ---------------------------------------------------------------------------
+
+class TestEnrichRowFragmentPath:
+    """Fragment entries (entries with fewer residues than the query) appear in
+    all_fragment_pdb_ids and their binders are collected unconditionally."""
+
+    def _entry_data(self):
+        return {
+            "exptl": [{"method": "X-RAY DIFFRACTION"}],
+            "rcsb_entry_info": {"diffrn_resolution_high": {"value": 2.0},
+                                "nonpolymer_bound_components": [],
+                                "deposited_polymer_monomer_count": 900},
+            "refine": [],
+            "pdbx_vrpt_summary_geometry": [],
+            "pdbx_vrpt_summary_diffraction": [],
+            "rcsb_entry_container_identifiers": {
+                "polymer_entity_ids": ["1"],
+                "non_polymer_entity_ids": [],
+            },
+        }
+
+    def _poly_entity(self):
+        return {
+            "entity_poly": {"rcsb_entity_polymer_type": "Protein",
+                            "pdbx_seq_one_letter_code_can": "A" * 100},
+            "rcsb_polymer_entity_container_identifiers": {"uniprot_ids": ["P12345"], "bird_id": None},
+            "rcsb_polymer_entity": {"pdbx_description": "Test protein"},
+            "rcsb_entity_source_organism": [],
+            "rcsb_target_cofactors": [],
+            "rcsb_polymer_entity_feature": [],
+        }
+
+    def _stub_result(self, pdb_id):
+        return {
+            "pdb_id": pdb_id, "entry_quality": {}, "ligand_metrics": [],
+            "peptide_entities": [], "has_ligands": False,
+            "species": "", "entity_names": "", "structure_quality": "",
+            "structure_quality_ligand_used": False,
+        }
+
+    def test_fragment_ids_in_all_fragment_pdb_ids(self):
+        client = MagicMock()
+        client.get.side_effect = [self._entry_data(), self._poly_entity(), {"1abc": []}]
+        client.post.side_effect = [
+            {"result_set": [{"identifier": "FRAG"}]},   # fragments (less)
+            {"result_set": [{"identifier": "FRAG"}]},   # lte-upper (FRAG is also ≤upper)
+            {"result_set": []},                          # full-length
+        ]
+
+        with patch("rcsb_enrichment.enrich._fetch_related_ligand_data",
+                   wraps=lambda c, p: self._stub_result(p)), \
+             patch("rcsb_enrichment.enrich.extract_direct_binders", return_value=[]):
+            result = enrich_row(
+                row={"PDBID": "1ABC", "Uniprot": "P12345"},
+                client=client, pdb_col="PDBID", uniprot_col="Uniprot",
+                seq_identity=0.9, max_related=25,
+            )
+
+        assert "FRAG" in result["all_fragment_pdb_ids"]
+        assert "FRAG" not in result["all_sibling_pdb_ids"]
+
+    def test_fragment_no_ligand_appears_in_pdb_ids_no_ligand(self):
+        client = MagicMock()
+        client.get.side_effect = [self._entry_data(), self._poly_entity(), {"1abc": []}]
+        client.post.side_effect = [
+            {"result_set": [{"identifier": "FRAG"}]},  # fragments
+            {"result_set": [{"identifier": "FRAG"}]},  # lte-upper
+            {"result_set": []},                         # full-length
+        ]
+
+        with patch("rcsb_enrichment.enrich._fetch_related_ligand_data",
+                   wraps=lambda c, p: self._stub_result(p)), \
+             patch("rcsb_enrichment.enrich.extract_direct_binders", return_value=[]):
+            result = enrich_row(
+                row={"PDBID": "1ABC", "Uniprot": "P12345"},
+                client=client, pdb_col="PDBID", uniprot_col="Uniprot",
+                seq_identity=0.9, max_related=25,
+            )
+
+        assert "FRAG" in result["fragment_pdb_ids_no_ligand"]
+        assert result["fragment_pdb_ids_no_ligand_count"] == 1
+
+    def test_sequence_fallback_when_no_uniprot(self):
+        """When no UniProt is available, sequence search is used."""
+        client = MagicMock()
+        entry = {
+            "exptl": [{"method": "X-RAY DIFFRACTION"}],
+            "rcsb_entry_info": {"diffrn_resolution_high": {"value": 2.0},
+                                "nonpolymer_bound_components": []},
+            "refine": [], "pdbx_vrpt_summary_geometry": [], "pdbx_vrpt_summary_diffraction": [],
+            "rcsb_entry_container_identifiers": {
+                "polymer_entity_ids": ["1"], "non_polymer_entity_ids": []
+            },
+        }
+        entity = {
+            "entity_poly": {"rcsb_entity_polymer_type": "Protein",
+                            "pdbx_seq_one_letter_code_can": "A" * 200},  # long enough to not be peptide
+            "rcsb_polymer_entity_container_identifiers": {"uniprot_ids": [], "bird_id": None},
+            "rcsb_polymer_entity": {"pdbx_description": "Unknown"},
+            "rcsb_entity_source_organism": [],
+            "rcsb_target_cofactors": [],
+            "rcsb_polymer_entity_feature": [],
+        }
+        client.get.side_effect = [entry, entity, {"1abc": []}]
+        client.post.return_value = {"result_set": []}
+
+        result = enrich_row(
+            row={"PDBID": "1ABC", "Uniprot": ""},
+            client=client, pdb_col="PDBID", uniprot_col="Uniprot",
+            seq_identity=0.9, max_related=25,
+        )
+        assert result["related_search_method"].startswith("sequence_id")

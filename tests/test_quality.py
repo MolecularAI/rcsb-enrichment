@@ -1,4 +1,4 @@
-"""Tests for quality.traffic_light, _parse_residue_features, get_entry_quality, get_ligand_quality."""
+"""Tests for quality.traffic_light, iridium_score, _parse_residue_features, get_entry_quality, get_ligand_quality."""
 
 import pytest
 from unittest.mock import MagicMock, call
@@ -10,6 +10,7 @@ from rcsb_enrichment.quality import (
     _parse_residue_features,
     get_entry_quality,
     get_ligand_quality,
+    iridium_score,
     traffic_light,
 )
 
@@ -349,3 +350,111 @@ class TestGetLigandQuality:
         results = get_ligand_quality(client, "1ABC", ["1"])
         assert results[0]["contact_residue_count"] == 1
         assert "ALA10(B)" in results[0]["contact_residues"]
+
+
+# ---------------------------------------------------------------------------
+# iridium_score
+# ---------------------------------------------------------------------------
+
+class TestIridiumScore:
+    def _xray_good(self):
+        return {
+            "exp_method": "X-RAY DIFFRACTION",
+            "resolution_A": 2.0,
+            "r_free": 0.22,
+            "clashscore": 5.0,
+            "ramachandran_outliers_pct": 0.3,
+            "rotamer_outliers_pct": 0.8,
+            "rsrz_outliers_pct": 3.0,
+        }
+
+    def test_good_xray_no_ligand(self):
+        grade, lig_used = iridium_score(self._xray_good(), None)
+        assert grade == "good"
+        assert lig_used is False
+
+    def test_empty_quality_returns_empty_grade(self):
+        grade, lig_used = iridium_score({}, None)
+        assert grade == ""
+        assert lig_used is False
+
+    def test_good_ligand_traffic_contributes_double_weight(self):
+        quality = {"exp_method": "X-RAY DIFFRACTION", "clashscore": 20.0}
+        grade_no_lig, _ = iridium_score(quality, None)
+        grade_good_lig, used = iridium_score(quality, "good")
+        assert used is True
+        # good ligand (score 0, weight 2) should not worsen the grade
+        # clashscore=20 → score 1 (fair); with weight 1; mean = (1×1 + 0×2)/3 = 0.33 → "good"
+        assert grade_good_lig == "good"
+
+    def test_bad_ligand_worsens_grade(self):
+        # clashscore=5 → good (score 0); but bad ligand (score 2, weight 2)
+        # mean = (0×1 + 2×2)/3 = 4/3 ≈ 1.33 → "bad"
+        quality = {"exp_method": "X-RAY DIFFRACTION", "clashscore": 5.0}
+        grade, used = iridium_score(quality, "bad")
+        assert grade == "bad"
+        assert used is True
+
+    def test_resolution_and_rfree_only_for_xray(self):
+        xray_q = {"exp_method": "X-RAY DIFFRACTION", "resolution_A": 3.5, "r_free": 0.35}
+        cryoem_q = {"exp_method": "ELECTRON MICROSCOPY", "resolution_A": 3.5, "r_free": 0.35}
+        xray_grade, _ = iridium_score(xray_q, None)
+        cryoem_grade, _ = iridium_score(cryoem_q, None)
+        assert xray_grade == "bad"
+        assert cryoem_grade == ""  # no metrics apply to cryo-EM
+
+    def test_rsrz_counted_for_non_xray(self):
+        # rsrz is not gated to X-ray in iridium_score; it applies whenever present
+        quality = {"exp_method": "ELECTRON MICROSCOPY", "clashscore": 5.0, "rsrz_outliers_pct": 20.0}
+        grade, _ = iridium_score(quality, None)
+        # clashscore=5 → score 0; rsrz=20 → score 2; mean = (0+2)/2 = 1.0 → "fair"
+        assert grade == "fair"
+
+    def test_rsrz_bad_threshold(self):
+        quality = {"exp_method": "X-RAY DIFFRACTION", "rsrz_outliers_pct": 15.0}
+        grade, _ = iridium_score(quality, None)
+        assert grade == "bad"
+
+    def test_missing_metrics_excluded_from_mean(self):
+        # Only clashscore present and it's good → grade is good despite no other metrics
+        quality = {"exp_method": "X-RAY DIFFRACTION", "clashscore": 2.0}
+        grade, _ = iridium_score(quality, None)
+        assert grade == "good"
+
+    def test_boundary_resolution_2_5(self):
+        q = {"exp_method": "X-RAY DIFFRACTION", "resolution_A": 2.5}
+        grade, _ = iridium_score(q, None)
+        assert grade == "good"
+
+    def test_boundary_resolution_just_over_2_5(self):
+        q = {"exp_method": "X-RAY DIFFRACTION", "resolution_A": 2.6}
+        grade, _ = iridium_score(q, None)
+        assert grade == "fair"
+
+    def test_boundary_resolution_over_3_0(self):
+        q = {"exp_method": "X-RAY DIFFRACTION", "resolution_A": 3.1}
+        grade, _ = iridium_score(q, None)
+        assert grade == "bad"
+
+    def test_fair_ligand_produces_fair_grade_with_good_structure(self):
+        quality = {
+            "exp_method": "X-RAY DIFFRACTION",
+            "resolution_A": 2.0, "r_free": 0.22,
+            "clashscore": 5.0,
+            "ramachandran_outliers_pct": 0.2,
+            "rotamer_outliers_pct": 0.5,
+            "rsrz_outliers_pct": 3.0,
+        }
+        grade, used = iridium_score(quality, "fair")
+        # All structure metrics score 0, ligand scores 1 (weight 2)
+        # mean = (0×6 + 1×2)/8 = 0.25 → "good"
+        assert grade == "good"
+        assert used is True
+
+    def test_ligand_used_false_when_traffic_is_none(self):
+        _, used = iridium_score(self._xray_good(), None)
+        assert used is False
+
+    def test_ligand_used_false_when_traffic_is_empty_string(self):
+        _, used = iridium_score(self._xray_good(), "")
+        assert used is False
