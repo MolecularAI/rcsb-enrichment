@@ -18,6 +18,7 @@ from .related import (
 log = logging.getLogger(__name__)
 
 _MAX_RELATED_BINDER_ENTRIES = 5  # cap API calls for sibling/full-length binder lookups
+_SEARCH_MAX_ROWS = 1000           # upper bound passed to RCSB search; independent of max_related
 
 
 def _entity_matches_names(description: str, name_filters: list) -> bool:
@@ -339,14 +340,14 @@ def enrich_row(
         for uid in all_uniprot:
             uid_seq_len = _uid_seq_len.get(uid, len(first_sequence))
             if uid_seq_len:
-                cache_key = (uid, uid_seq_len, max_related * 2)
+                cache_key = (uid, uid_seq_len, _SEARCH_MAX_ROWS)
                 if uniprot_search_cache is not None and cache_key in uniprot_search_cache:
                     log.info("[%s] UniProt search cache hit for %s", pdb_id, uid)
                     _frag, _sib, _full = uniprot_search_cache[cache_key]
                 else:
                     log.info("[%s] Searching related entries by UniProt %s", pdb_id, uid)
                     _frag, _sib, _full = get_related_by_uniprot_split(
-                        client, uid, uid_seq_len, max_rows=max_related * 2
+                        client, uid, uid_seq_len, max_rows=_SEARCH_MAX_ROWS
                     )
                     if uniprot_search_cache is not None:
                         uniprot_search_cache[cache_key] = (_frag, _sib, _full)
@@ -364,13 +365,13 @@ def enrich_row(
                         fulllength_ids.append(r)
                 search_method = "uniprot_split"
             else:
-                cache_key = (uid, 0, max_related * 2)
+                cache_key = (uid, 0, _SEARCH_MAX_ROWS)
                 if uniprot_search_cache is not None and cache_key in uniprot_search_cache:
                     log.info("[%s] UniProt search cache hit for %s", pdb_id, uid)
                     _results = uniprot_search_cache[cache_key]
                 else:
                     log.info("[%s] Searching related entries by UniProt %s", pdb_id, uid)
-                    _results = get_related_by_uniprot(client, uid, max_rows=max_related * 2)
+                    _results = get_related_by_uniprot(client, uid, max_rows=_SEARCH_MAX_ROWS)
                     if uniprot_search_cache is not None:
                         uniprot_search_cache[cache_key] = _results
                 for r in _results:
@@ -430,9 +431,9 @@ def enrich_row(
         else:
             fulllength_no_ligand.append(fid)
 
-    result["all_fragment_pdb_ids"] = ",".join(fragment_ids[:max_related])
-    result["all_sibling_pdb_ids"] = ",".join(sibling_ids[:max_related])
-    result["all_fulllength_pdb_ids"] = ",".join(fulllength_ids[:max_related])
+    result["all_fragment_pdb_ids"] = ",".join(fragment_ids)
+    result["all_sibling_pdb_ids"] = ",".join(sibling_ids)
+    result["all_fulllength_pdb_ids"] = ",".join(fulllength_ids)
     result["fragment_pdb_ids_no_ligand"] = ",".join(fragment_no_ligand)
     result["fragment_pdb_ids_no_ligand_count"] = len(fragment_no_ligand)
     result["sibling_pdb_ids_no_ligand"] = ",".join(sibling_no_ligand)
